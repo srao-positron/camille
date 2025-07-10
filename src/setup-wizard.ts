@@ -7,7 +7,7 @@ import inquirer from 'inquirer';
 import inquirerAutocompletePrompt from 'inquirer-autocomplete-prompt';
 import fuzzy from 'fuzzy';
 import chalk from 'chalk';
-import ora from 'ora';
+import ora, { Ora } from 'ora';
 import boxen from 'boxen';
 import figlet from 'figlet';
 import * as fs from 'fs';
@@ -288,37 +288,94 @@ export class SetupWizard {
       name: 'selectedPath',
       message: 'Select a directory (type to search):',
       source: async (_answers: any, input: string) => {
-        const searchPath = input || currentDir;
-        const basePath = path.dirname(searchPath);
-        
-        try {
-          const entries = await fs.promises.readdir(basePath, { withFileTypes: true });
-          const dirs = entries
-            .filter(entry => entry.isDirectory() && !entry.name.startsWith('.'))
-            .map(entry => path.join(basePath, entry.name));
-
-          if (!input) {
-            // Add common directories as suggestions
-            dirs.unshift(
-              currentDir,
-              homeDir,
-              path.join(homeDir, 'projects'),
-              path.join(homeDir, 'Documents'),
-              path.join(homeDir, 'dev')
-            );
-          }
-
-          return fuzzy.filter(input || '', dirs, {
-            extract: (dir: string) => dir
-          }).map((result: any) => ({
-            name: this.formatDirDisplay(result.original),
-            value: result.original
+        // Handle empty input
+        if (!input) {
+          // Show common directories as suggestions
+          const suggestions = [
+            currentDir,
+            homeDir,
+            path.join(homeDir, 'projects'),
+            path.join(homeDir, 'Documents'),
+            path.join(homeDir, 'dev'),
+            path.join(homeDir, 'Desktop'),
+            path.join(homeDir, 'Downloads')
+          ].filter(dir => fs.existsSync(dir));
+          
+          return suggestions.map(dir => ({
+            name: this.formatDirDisplay(dir),
+            value: dir
           }));
-        } catch {
-          return [];
         }
+
+        // Expand ~ to home directory
+        const expandedInput = input.replace(/^~/, homeDir);
+        
+        // Get all possible matches
+        const candidates: string[] = [];
+        
+        // If input looks like a complete path, check if it exists
+        if (fs.existsSync(expandedInput) && fs.statSync(expandedInput).isDirectory()) {
+          candidates.push(expandedInput);
+        }
+        
+        // Try to find directories that start with the input
+        try {
+          // Get the parent directory to search in
+          let searchDir: string;
+          let searchPrefix: string;
+          
+          if (expandedInput.includes(path.sep)) {
+            const lastSep = expandedInput.lastIndexOf(path.sep);
+            searchDir = expandedInput.substring(0, lastSep) || path.sep;
+            searchPrefix = expandedInput.substring(lastSep + 1);
+          } else {
+            searchDir = currentDir;
+            searchPrefix = expandedInput;
+          }
+          
+          // Only search if the search directory exists
+          if (fs.existsSync(searchDir) && fs.statSync(searchDir).isDirectory()) {
+            const entries = await fs.promises.readdir(searchDir, { withFileTypes: true });
+            
+            for (const entry of entries) {
+              if (entry.isDirectory() && entry.name.toLowerCase().startsWith(searchPrefix.toLowerCase())) {
+                candidates.push(path.join(searchDir, entry.name));
+              }
+            }
+          }
+        } catch (error) {
+          // Ignore errors when reading directories
+          this.logger.debug('Error reading directory for autocomplete', error);
+        }
+        
+        // Also search in common locations if input doesn't have a path separator
+        if (!input.includes(path.sep) && !input.startsWith('~')) {
+          const commonDirs = [homeDir, currentDir, path.join(homeDir, 'projects'), path.join(homeDir, 'dev')];
+          for (const dir of commonDirs) {
+            try {
+              if (fs.existsSync(dir)) {
+                const entries = await fs.promises.readdir(dir, { withFileTypes: true });
+                for (const entry of entries) {
+                  if (entry.isDirectory() && entry.name.toLowerCase().includes(input.toLowerCase())) {
+                    candidates.push(path.join(dir, entry.name));
+                  }
+                }
+              }
+            } catch {
+              // Ignore errors
+            }
+          }
+        }
+        
+        // Remove duplicates and format results
+        const unique = Array.from(new Set(candidates));
+        return unique.map(dir => ({
+          name: this.formatDirDisplay(dir),
+          value: dir
+        }));
       },
-      pageSize: 10
+      pageSize: 10,
+      suggestOnly: false
     }]);
 
     return [selectedPath];
@@ -399,13 +456,26 @@ export class SetupWizard {
     const { manualPath } = await inquirer.prompt([{
       type: 'input',
       name: 'manualPath',
-      message: 'Enter directory path:',
+      message: 'Enter directory path (use ~ for home):',
       default: process.cwd(),
       validate: (input: string) => {
         if (!input) return 'Path is required';
         const expanded = input.replace(/^~/, os.homedir());
-        if (!fs.existsSync(expanded)) return 'Directory does not exist';
-        if (!fs.statSync(expanded).isDirectory()) return 'Path is not a directory';
+        const resolved = path.resolve(expanded);
+        
+        if (!fs.existsSync(resolved)) {
+          // Try to provide a helpful error message
+          const parent = path.dirname(resolved);
+          if (!fs.existsSync(parent)) {
+            return `Parent directory does not exist: ${parent}`;
+          }
+          return `Directory does not exist: ${resolved}`;
+        }
+        
+        if (!fs.statSync(resolved).isDirectory()) {
+          return 'Path is not a directory';
+        }
+        
         return true;
       },
       filter: (input: string) => {
@@ -433,14 +503,71 @@ export class SetupWizard {
       return { enabled: false };
     }
 
-    const { autoStart } = await inquirer.prompt([{
-      type: 'confirm',
-      name: 'autoStart',
-      message: 'Start MCP server automatically with Camille?',
-      default: true
+    console.log(chalk.gray('\nMCP requires a .mcp.json file in each project where you want to use Camille.'));
+    console.log(chalk.gray('You can also add this file manually later.\n'));
+
+    const { setupChoice } = await inquirer.prompt([{
+      type: 'list',
+      name: 'setupChoice',
+      message: 'How would you like to set up MCP?',
+      choices: [
+        { name: 'Create .mcp.json in specific projects', value: 'specific' },
+        { name: 'Show me how to add it manually later', value: 'manual' },
+        { name: 'Skip MCP setup for now', value: 'skip' }
+      ]
     }]);
 
-    return { enabled: true, autoStart };
+    if (setupChoice === 'skip') {
+      return { enabled: false };
+    }
+
+    if (setupChoice === 'manual') {
+      console.log(chalk.yellow('\nTo enable MCP in a project, create a .mcp.json file:'));
+      console.log(chalk.gray(`{
+  "mcpServers": {
+    "camille": {
+      "command": "camille",
+      "args": ["server", "start", "--mcp"],
+      "env": {
+        "OPENAI_API_KEY": "\${OPENAI_API_KEY}"
+      }
+    }
+  }
+}`));
+      return { enabled: true, autoStart: false, manualSetup: true };
+    }
+
+    // Let user select which projects to enable MCP in
+    const watchedDirs = this.configManager.getConfig().watchedDirectories || [];
+    const projectDirs: string[] = [];
+    
+    if (watchedDirs.length > 0) {
+      const { selectedProjects } = await inquirer.prompt([{
+        type: 'checkbox',
+        name: 'selectedProjects',
+        message: 'Select projects where you want to enable MCP:',
+        choices: watchedDirs.map(dir => ({
+          name: this.formatDirDisplay(dir),
+          value: dir,
+          checked: true
+        }))
+      }]);
+      projectDirs.push(...selectedProjects);
+    } else {
+      // No watched directories yet, ask for project paths
+      const { addProject } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'addProject',
+        message: 'Would you like to add .mcp.json to the current directory?',
+        default: true
+      }]);
+      
+      if (addProject) {
+        projectDirs.push(process.cwd());
+      }
+    }
+
+    return { enabled: true, autoStart: true, projectDirs };
   }
 
   /**
@@ -567,7 +694,7 @@ export class SetupWizard {
 
       // Create Claude Code settings file
       if (hooksConfig.enabled || mcpConfig.enabled) {
-        await this.createClaudeCodeSettings(hooksConfig, mcpConfig);
+        await this.createClaudeCodeSettings(hooksConfig, mcpConfig, spinner);
       }
 
       // Set up system service
@@ -586,52 +713,163 @@ export class SetupWizard {
   /**
    * Creates Claude Code settings file
    */
-  private async createClaudeCodeSettings(hooksConfig: any, mcpConfig: any): Promise<void> {
-    const settings: any = {};
-
+  private async createClaudeCodeSettings(hooksConfig: any, mcpConfig: any, spinner?: Ora): Promise<void> {
+    // Handle hooks configuration (still goes in .claude-code/settings.json)
     if (hooksConfig.enabled) {
-      settings.hooks = {
-        preToolUse: [{
-          command: 'camille hook',
-          matchers: {
-            tools: hooksConfig.tools
-          }
-        }]
-      };
-    }
-
-    if (mcpConfig.enabled) {
-      settings.mcpServers = {
-        camille: {
-          transport: 'pipe',
-          pipeName: process.platform === 'win32' 
-            ? '\\\\.\\pipe\\camille-mcp'
-            : path.join(os.tmpdir(), 'camille-mcp.sock')
+      let settings: any = {
+        hooks: {
+          preToolUse: [{
+            command: 'camille hook',
+            matchers: {
+              tools: hooksConfig.tools
+            }
+          }]
         }
       };
+
+      const settingsPath = path.join(os.homedir(), '.claude-code', 'settings.json');
+      const settingsDir = path.dirname(settingsPath);
+
+      if (!fs.existsSync(settingsDir)) {
+        fs.mkdirSync(settingsDir, { recursive: true });
+      }
+
+      // Merge with existing settings
+      let existingSettings: any = {};
+      if (fs.existsSync(settingsPath)) {
+        try {
+          existingSettings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
+          this.logger.info('Found existing Claude Code settings', { settingsPath });
+          
+          // Check if user already has hooks configured
+          if (existingSettings.hooks?.preToolUse && existingSettings.hooks.preToolUse.length > 0) {
+            // Stop spinner to show prompt
+            if (spinner) spinner.stop();
+            
+            console.log(chalk.yellow('\n⚠ Found existing hooks in Claude Code settings'));
+            
+            const { mergeChoice } = await inquirer.prompt([{
+              type: 'list',
+              name: 'mergeChoice',
+              message: 'How would you like to handle existing hooks?',
+              choices: [
+                { name: 'Add Camille hook alongside existing hooks', value: 'merge' },
+                { name: 'Replace existing hooks with Camille hook', value: 'replace' },
+                { name: 'Skip hook configuration', value: 'skip' }
+              ]
+            }]);
+            
+            // Restart spinner after prompt
+            if (spinner) spinner.start('Applying configuration...');
+            
+            if (mergeChoice === 'skip') {
+              console.log(chalk.gray('Skipped hook configuration'));
+              return;
+            }
+            
+            if (mergeChoice === 'merge') {
+              // Check if Camille hook already exists
+              const camilleHookExists = existingSettings.hooks.preToolUse.some((hook: any) => 
+                hook.command === 'camille hook'
+              );
+              
+              if (camilleHookExists) {
+                console.log(chalk.gray('Camille hook already configured'));
+                return;
+              }
+              
+              // Add Camille hook to existing hooks
+              existingSettings.hooks.preToolUse.push(settings.hooks.preToolUse[0]);
+              settings = existingSettings;
+            }
+          } else {
+            // No existing hooks, safe to merge
+            const mergedSettings = { 
+              ...existingSettings, 
+              hooks: {
+                ...existingSettings.hooks,
+                ...settings.hooks
+              }
+            };
+            settings = mergedSettings;
+          }
+        } catch (error) {
+          this.logger.error('Failed to parse existing settings', error);
+          console.log(chalk.red('⚠ Failed to read existing settings, creating new file'));
+        }
+      }
+
+      fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2));
+      
+      this.logger.info('Updated Claude Code settings for hooks', { settingsPath });
+      console.log(chalk.green(`✓ Updated Claude Code hooks configuration`));
     }
 
-    const settingsPath = path.join(os.homedir(), '.claude-code', 'settings.json');
-    const settingsDir = path.dirname(settingsPath);
+    // Handle MCP configuration (goes in project root .mcp.json)
+    if (mcpConfig.enabled && !mcpConfig.manualSetup && mcpConfig.projectDirs) {
+      // Create .mcp.json in each selected project directory
+      for (const dir of mcpConfig.projectDirs) {
+        // Use named pipe connection to central service instead of spawning new server
+        const pipePath = process.platform === 'win32' 
+          ? '\\\\.\\pipe\\camille-mcp'
+          : path.join(os.tmpdir(), 'camille-mcp.sock');
+          
+        const mcpConfigData = {
+          mcpServers: {
+            camille: {
+              transport: "pipe",
+              pipeName: pipePath
+            }
+          }
+        };
 
-    if (!fs.existsSync(settingsDir)) {
-      fs.mkdirSync(settingsDir, { recursive: true });
-    }
+        const mcpPath = path.join(dir, '.mcp.json');
+        
+        // Check if file already exists
+        let existingMcpConfig = {};
+        if (fs.existsSync(mcpPath)) {
+          try {
+            existingMcpConfig = JSON.parse(fs.readFileSync(mcpPath, 'utf8'));
+            this.logger.info('Found existing .mcp.json', { mcpPath });
+            
+            // Stop spinner to show prompt
+            if (spinner) spinner.stop();
+            
+            // Ask user if they want to overwrite
+            const { overwrite } = await inquirer.prompt([{
+              type: 'confirm',
+              name: 'overwrite',
+              message: `${chalk.yellow('⚠')} .mcp.json already exists in ${this.formatDirDisplay(dir)}. Update it?`,
+              default: true
+            }]);
+            
+            // Restart spinner after prompt
+            if (spinner) spinner.start('Applying configuration...');
+            
+            if (!overwrite) {
+              console.log(chalk.gray(`Skipped ${mcpPath}`));
+              continue;
+            }
+          } catch {
+            this.logger.warn('Failed to parse existing .mcp.json', { mcpPath });
+          }
+        }
 
-    // Merge with existing settings
-    let existingSettings = {};
-    if (fs.existsSync(settingsPath)) {
-      try {
-        existingSettings = JSON.parse(fs.readFileSync(settingsPath, 'utf8'));
-      } catch {
-        // Ignore parse errors
+        // Merge configurations
+        const mergedMcpConfig = {
+          ...existingMcpConfig,
+          mcpServers: {
+            ...(existingMcpConfig as any).mcpServers,
+            ...mcpConfigData.mcpServers
+          }
+        };
+
+        fs.writeFileSync(mcpPath, JSON.stringify(mergedMcpConfig, null, 2));
+        this.logger.info('Created/updated .mcp.json for MCP server', { mcpPath });
+        
+        console.log(chalk.green(`✓ Created .mcp.json in ${this.formatDirDisplay(dir)}`));
       }
     }
-
-    const mergedSettings = { ...existingSettings, ...settings };
-    fs.writeFileSync(settingsPath, JSON.stringify(mergedSettings, null, 2));
-    
-    this.logger.info('Created Claude Code settings', { settingsPath });
   }
 
   /**
@@ -776,22 +1014,81 @@ WantedBy=default.target`;
    * Shows success message
    */
   private showSuccess(): void {
-    const success = boxen(
-      chalk.green('✅ Camille Setup Complete!\n\n') +
-      chalk.white('Quick Start Commands:\n\n') +
-      chalk.gray('  Start server: ') + chalk.cyan('camille server start') + '\n' +
-      chalk.gray('  Check status: ') + chalk.cyan('camille server status') + '\n' +
-      chalk.gray('  View logs: ') + chalk.cyan('tail -f /tmp/camille.log') + '\n\n' +
-      chalk.white('The server will start automatically on system boot.'),
-      {
-        padding: 1,
-        margin: 1,
-        borderStyle: 'round',
-        borderColor: 'green'
-      }
-    );
+    const config = this.configManager.getConfig();
+    
+    // Build success message based on what was configured
+    let message = chalk.green('✅ Camille Setup Complete!\n\n');
+    
+    // What was configured
+    message += chalk.white('What\'s configured:\n');
+    
+    if (config.openaiApiKey) {
+      message += chalk.gray('  ✓ OpenAI API key set\n');
+    }
+    
+    if (config.watchedDirectories && config.watchedDirectories.length > 0) {
+      message += chalk.gray(`  ✓ Watching ${config.watchedDirectories.length} director${config.watchedDirectories.length === 1 ? 'y' : 'ies'}\n`);
+    }
+    
+    if (config.hooks?.enabled) {
+      message += chalk.gray('  ✓ Claude Code hooks configured\n');
+    }
+    
+    if (config.mcp?.enabled) {
+      message += chalk.gray('  ✓ MCP server configuration created\n');
+    }
+    
+    if (config.autoStart?.enabled) {
+      message += chalk.gray('  ✓ Auto-start service enabled\n');
+    }
+    
+    // Next steps
+    message += '\n' + chalk.white('Next steps:\n\n');
+    
+    // Hook testing
+    if (config.hooks?.enabled) {
+      message += chalk.yellow('1. Test Claude Code hooks:\n');
+      message += chalk.gray('   • Open a project in Claude Code\n');
+      message += chalk.gray('   • Try editing a file\n');
+      message += chalk.gray('   • Camille will review the changes\n\n');
+    }
+    
+    // MCP testing
+    if (config.mcp?.enabled) {
+      message += chalk.yellow('2. Test MCP integration:\n');
+      message += chalk.gray('   • Open a project with .mcp.json in Claude Code\n');
+      message += chalk.gray('   • Ask Claude to "search for <something>"\n');
+      message += chalk.gray('   • Claude will connect to the central Camille service\n');
+      message += chalk.gray('   • No new servers will be spawned per project\n\n');
+    }
+    
+    // Server commands
+    message += chalk.yellow('3. Useful commands:\n');
+    message += chalk.gray('   • Start server manually: ') + chalk.cyan('camille server start') + '\n';
+    message += chalk.gray('   • Check status: ') + chalk.cyan('camille server status') + '\n';
+    message += chalk.gray('   • View configuration: ') + chalk.cyan('camille config show') + '\n';
+    message += chalk.gray('   • View logs: ') + chalk.cyan('tail -f /tmp/camille.log') + '\n';
+    
+    if (!config.mcp?.enabled || (config.mcp as any)?.manualSetup) {
+      message += '\n' + chalk.yellow('4. Add MCP to a project later:\n');
+      message += chalk.gray('   • Run: ') + chalk.cyan('camille init-mcp') + chalk.gray(' in project root\n');
+    }
+    
+    const success = boxen(message, {
+      padding: 1,
+      margin: 1,
+      borderStyle: 'round',
+      borderColor: 'green'
+    });
 
     console.log(success);
+    
+    // Additional tips
+    console.log(chalk.dim('\n💡 Tips:'));
+    console.log(chalk.dim('  • Run "camille help mcp" for MCP troubleshooting'));
+    console.log(chalk.dim('  • Check ~/.camille/config.json to modify settings'));
+    console.log(chalk.dim('  • Report issues at: https://github.com/srao-positron/camille/issues\n'));
+    
     this.logger.info('Setup completed successfully');
   }
 

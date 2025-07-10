@@ -6,6 +6,7 @@
 import * as chokidar from 'chokidar';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 import { glob } from 'glob';
 import PQueue from 'p-queue';
 import ora from 'ora';
@@ -14,6 +15,8 @@ import { ConfigManager } from './config';
 import { OpenAIClient } from './openai-client';
 import { EmbeddingsIndex, FileFilter } from './embeddings';
 import { EMBEDDING_PROMPT } from './prompts';
+import { consoleOutput, isQuietMode } from './utils/console';
+import { logger } from './logger';
 
 /**
  * Server status
@@ -39,6 +42,8 @@ export class CamilleServer {
   private indexQueue: PQueue;
   private status: ServerStatus;
   private spinner?: any;
+  private configWatcher?: chokidar.FSWatcher;
+  private lastConfigContent?: string;
 
   constructor() {
     this.configManager = new ConfigManager();
@@ -69,7 +74,8 @@ export class CamilleServer {
    * Starts the server with one or more directories
    */
   public async start(directories: string | string[] = process.cwd()): Promise<void> {
-    console.log(chalk.blue('🚀 Starting Camille server...'));
+    consoleOutput.info(chalk.blue('🚀 Starting Camille server...'));
+    logger.logServerEvent('server_starting', { directories });
     
     this.status.isRunning = true;
     
@@ -81,8 +87,29 @@ export class CamilleServer {
       await this.addDirectory(dir);
     }
     
-    console.log(chalk.green('✅ Camille server is running'));
-    console.log(chalk.gray(`Indexed files: ${this.embeddingsIndex.getIndexSize()}`));
+    // If no directories to watch, mark index as ready
+    if (dirsToWatch.length === 0) {
+      this.embeddingsIndex.setReady(true);
+    }
+    
+    // Wait for index to be ready before reporting server as started
+    if (!this.embeddingsIndex.isIndexReady()) {
+      consoleOutput.info(chalk.gray('Waiting for initial indexing to complete...'));
+      // Poll until index is ready
+      while (!this.embeddingsIndex.isIndexReady()) {
+        await new Promise(resolve => setTimeout(resolve, 100));
+      }
+    }
+    
+    consoleOutput.success('✅ Camille server is running and index is ready');
+    consoleOutput.info(chalk.gray(`Indexed files: ${this.embeddingsIndex.getIndexSize()}`));
+    logger.logServerEvent('server_started', { 
+      directories: this.getWatchedDirectories(),
+      indexSize: this.embeddingsIndex.getIndexSize() 
+    });
+    
+    // Set up config file watching
+    this.setupConfigWatcher();
   }
 
   /**
@@ -93,7 +120,7 @@ export class CamilleServer {
     
     // Check if already watching
     if (this.watchedDirectories.has(absPath)) {
-      console.log(chalk.yellow(`Already watching: ${absPath}`));
+      consoleOutput.warning(`Already watching: ${absPath}`);
       return;
     }
     
@@ -102,7 +129,7 @@ export class CamilleServer {
       throw new Error(`Not a valid directory: ${absPath}`);
     }
     
-    console.log(chalk.blue(`Adding directory: ${absPath}`));
+    consoleOutput.info(chalk.blue(`Adding directory: ${absPath}`));
     
     // Add to watched set
     this.watchedDirectories.add(absPath);
@@ -114,7 +141,8 @@ export class CamilleServer {
     // Set up file watcher
     this.setupFileWatcher(absPath);
     
-    console.log(chalk.green(`✅ Now watching: ${absPath}`));
+    consoleOutput.success(`✅ Now watching: ${absPath}`);
+    logger.logServerEvent('directory_added', { directory: absPath });
   }
   
   /**
@@ -124,11 +152,11 @@ export class CamilleServer {
     const absPath = path.resolve(directory);
     
     if (!this.watchedDirectories.has(absPath)) {
-      console.log(chalk.yellow(`Not watching: ${absPath}`));
+      consoleOutput.warning(`Not watching: ${absPath}`);
       return;
     }
     
-    console.log(chalk.blue(`Removing directory: ${absPath}`));
+    consoleOutput.info(chalk.blue(`Removing directory: ${absPath}`));
     
     // Close the watcher
     const watcher = this.watchers.get(absPath);
@@ -149,7 +177,8 @@ export class CamilleServer {
       }
     }
     
-    console.log(chalk.green(`✅ Stopped watching: ${absPath}`));
+    consoleOutput.success(`✅ Stopped watching: ${absPath}`);
+    logger.logServerEvent('directory_removed', { directory: absPath });
   }
   
   /**
@@ -163,7 +192,8 @@ export class CamilleServer {
    * Stops the server
    */
   public async stop(): Promise<void> {
-    console.log(chalk.yellow('Stopping Camille server...'));
+    consoleOutput.warning('Stopping Camille server...');
+    logger.logServerEvent('server_stopping');
     
     this.status.isRunning = false;
     
@@ -174,9 +204,16 @@ export class CamilleServer {
     this.watchers.clear();
     this.watchedDirectories.clear();
     
+    // Close config watcher
+    if (this.configWatcher) {
+      await this.configWatcher.close();
+      this.configWatcher = undefined;
+    }
+    
     await this.indexQueue.onIdle();
     
-    console.log(chalk.green('✅ Camille server stopped'));
+    consoleOutput.success('✅ Camille server stopped');
+    logger.logServerEvent('server_stopped');
   }
 
   /**
@@ -202,8 +239,9 @@ export class CamilleServer {
    * Performs initial indexing of all files
    */
   private async performInitialIndexing(directory: string): Promise<void> {
-    this.spinner = ora('Discovering files...').start();
+    this.spinner = isQuietMode() ? null : ora('Discovering files...').start();
     this.status.isIndexing = true;
+    logger.logServerEvent('indexing_started', { directory });
     
     try {
       // Find all files to index
@@ -217,12 +255,14 @@ export class CamilleServer {
       const filesToIndex = files.filter(file => this.fileFilter.shouldIndex(file));
       
       if (filesToIndex.length === 0) {
-        this.spinner.succeed('No files to index');
+        if (this.spinner) this.spinner.succeed('No files to index');
+        consoleOutput.info('No files to index');
         this.embeddingsIndex.setReady(true);
         return;
       }
       
-      this.spinner.text = `Indexing ${filesToIndex.length} files...`;
+      if (this.spinner) this.spinner.text = `Indexing ${filesToIndex.length} files...`;
+      logger.info(`Starting to index ${filesToIndex.length} files`);
       
       // Add all files to the queue
       let processed = 0;
@@ -230,18 +270,27 @@ export class CamilleServer {
         this.indexQueue.add(async () => {
           await this.indexFile(file);
           processed++;
-          this.spinner!.text = `Indexing files... (${processed}/${filesToIndex.length})`;
+          if (this.spinner) {
+            this.spinner.text = `Indexing files... (${processed}/${filesToIndex.length})`;
+          }
         });
       }
       
       // Wait for all indexing to complete
       await this.indexQueue.onIdle();
       
-      this.spinner.succeed(`Indexed ${filesToIndex.length} files`);
+      if (this.spinner) this.spinner.succeed(`Indexed ${filesToIndex.length} files`);
+      consoleOutput.success(`Indexed ${filesToIndex.length} files`);
+      logger.logServerEvent('indexing_completed', { 
+        directory, 
+        filesIndexed: filesToIndex.length 
+      });
       this.embeddingsIndex.setReady(true);
       
     } catch (error) {
-      this.spinner?.fail(`Indexing failed: ${error}`);
+      if (this.spinner) this.spinner.fail(`Indexing failed: ${error}`);
+      consoleOutput.error(`Indexing failed: ${error}`);
+      logger.error('Indexing failed', error, { directory });
       throw error;
     } finally {
       this.status.isIndexing = false;
@@ -267,7 +316,8 @@ export class CamilleServer {
     // Handle file changes
     watcher.on('change', (filePath) => {
       if (this.fileFilter.shouldIndex(filePath)) {
-        console.log(chalk.gray(`File changed: ${path.relative(directory, filePath)}`));
+        consoleOutput.debug(`File changed: ${path.relative(directory, filePath)}`);
+        logger.info('File change detected', { path: filePath, directory });
         this.indexQueue.add(() => this.reindexFile(filePath));
       }
     });
@@ -275,14 +325,16 @@ export class CamilleServer {
     // Handle new files
     watcher.on('add', (filePath) => {
       if (this.fileFilter.shouldIndex(filePath)) {
-        console.log(chalk.gray(`File added: ${path.relative(directory, filePath)}`));
+        consoleOutput.debug(`File added: ${path.relative(directory, filePath)}`);
+        logger.info('New file detected', { path: filePath, directory });
         this.indexQueue.add(() => this.indexFile(filePath));
       }
     });
     
     // Handle deleted files
     watcher.on('unlink', (filePath) => {
-      console.log(chalk.gray(`File deleted: ${path.relative(directory, filePath)}`));
+      consoleOutput.debug(`File deleted: ${path.relative(directory, filePath)}`);
+      logger.info('File deleted', { path: filePath, directory });
       this.embeddingsIndex.removeFile(filePath);
     });
   }
@@ -295,23 +347,34 @@ export class CamilleServer {
       const content = fs.readFileSync(filePath, 'utf8');
       
       // Skip very large files
-      if (content.length > 100000) {
-        console.log(chalk.yellow(`Skipping large file: ${path.basename(filePath)}`));
+      const maxSize = this.configManager.getConfig().maxIndexFileSize || 500000;
+      if (content.length > maxSize) {
+        consoleOutput.warning(`Skipping large file: ${path.basename(filePath)} (${content.length} bytes > ${maxSize} bytes)`);
+        logger.logFileOperation('skip_large_file', filePath, true);
+        logger.info('Skipped large file during indexing', { 
+          path: filePath, 
+          size: content.length, 
+          maxSize 
+        });
         return;
       }
       
       // Generate summary for the file
+      logger.debug('Generating summary for file', { path: filePath, size: content.length });
       const summary = await this.generateFileSummary(filePath, content);
       
       // Generate embedding
       const embeddingInput = `${path.basename(filePath)}\n${summary}\n${content.substring(0, 8000)}`;
+      logger.debug('Generating embedding for file', { path: filePath, inputSize: embeddingInput.length });
       const embedding = await this.openaiClient.generateEmbedding(embeddingInput);
       
       // Store in index
       this.embeddingsIndex.addEmbedding(filePath, embedding, content, summary);
+      logger.info('File indexed successfully', { path: filePath, size: content.length });
       
     } catch (error) {
-      console.error(chalk.red(`Failed to index ${filePath}:`, error));
+      consoleOutput.error(`Failed to index ${filePath}: ${error}`);
+      logger.error(`Failed to index file`, error, { filePath });
     }
   }
 
@@ -325,6 +388,78 @@ export class CamilleServer {
   }
 
   /**
+   * Sets up config file watching
+   */
+  private setupConfigWatcher(): void {
+    const configPath = path.join(
+      process.env.CAMILLE_CONFIG_DIR || path.join(os.homedir(), '.camille'),
+      'config.json'
+    );
+    
+    // Store initial config content
+    try {
+      this.lastConfigContent = fs.readFileSync(configPath, 'utf8');
+    } catch (error) {
+      logger.error('Failed to read initial config', error);
+      return;
+    }
+    
+    this.configWatcher = chokidar.watch(configPath, {
+      persistent: true,
+      ignoreInitial: true
+    });
+    
+    this.configWatcher.on('change', async () => {
+      try {
+        const newContent = fs.readFileSync(configPath, 'utf8');
+        
+        // Check if content actually changed (avoid multiple events)
+        if (newContent === this.lastConfigContent) {
+          return;
+        }
+        
+        this.lastConfigContent = newContent;
+        consoleOutput.info(chalk.yellow('Configuration file changed, reloading...'));
+        logger.info('Configuration file changed');
+        
+        // Reload configuration
+        const newConfig = JSON.parse(newContent);
+        const oldWatchedDirs = new Set(this.watchedDirectories);
+        const newWatchedDirs = new Set<string>(newConfig.watchedDirectories || []);
+        
+        // Find directories to add
+        for (const dir of newWatchedDirs) {
+          if (!oldWatchedDirs.has(dir)) {
+            consoleOutput.info(chalk.blue(`Adding new directory from config: ${dir}`));
+            await this.addDirectory(dir);
+          }
+        }
+        
+        // Find directories to remove
+        for (const dir of oldWatchedDirs) {
+          if (!newWatchedDirs.has(dir)) {
+            consoleOutput.info(chalk.blue(`Removing directory no longer in config: ${dir}`));
+            await this.removeDirectory(dir);
+          }
+        }
+        
+        // Update other settings
+        const config = this.configManager.getConfig();
+        this.fileFilter = new FileFilter(config.ignorePatterns);
+        this.openaiClient = new OpenAIClient(this.configManager.getApiKey(), config, process.cwd());
+        
+        consoleOutput.success('✅ Configuration reloaded');
+        logger.info('Configuration reloaded successfully');
+      } catch (error) {
+        logger.error('Failed to reload configuration', error);
+        consoleOutput.error('Failed to reload configuration: ' + error);
+      }
+    });
+    
+    consoleOutput.info(chalk.gray('Watching configuration file for changes'));
+  }
+  
+  /**
    * Generates a summary of a file for better search
    */
   private async generateFileSummary(filePath: string, content: string): Promise<string> {
@@ -335,7 +470,7 @@ export class CamilleServer {
       const summary = await this.openaiClient.complete(prompt);
       return summary.substring(0, 500); // Limit summary length
     } catch (error) {
-      console.error('Failed to generate summary:', error);
+      logger.error('Failed to generate summary', error, { filePath });
       return '';
     }
   }
@@ -346,14 +481,27 @@ export class CamilleServer {
  */
 export class ServerManager {
   private static instance?: CamilleServer;
+  private static pidFilePath: string = path.join(
+    process.env.CAMILLE_CONFIG_DIR || path.join(os.homedir(), '.camille'),
+    'server.pid'
+  );
 
   /**
    * Starts the server if not already running
    */
   public static async start(directories: string | string[] = process.cwd()): Promise<CamilleServer> {
+    // Check if another server is already running
+    if (this.isServerRunning()) {
+      throw new Error('Camille server is already running. Use "camille server stop" to stop it first.');
+    }
+    
     if (!this.instance) {
       this.instance = new CamilleServer();
       await this.instance.start(directories);
+      
+      // Write PID file
+      this.writePidFile();
+      logger.info('PID file written', { pid: process.pid, pidFile: this.pidFilePath });
     }
     return this.instance;
   }
@@ -369,9 +517,121 @@ export class ServerManager {
    * Stops the server if running
    */
   public static async stop(): Promise<void> {
+    // First try to stop the local instance
     if (this.instance) {
       await this.instance.stop();
       this.instance = undefined;
+      this.removePidFile();
+      return;
+    }
+    
+    // If no local instance, try to stop by PID
+    const pid = this.readPidFile();
+    if (pid) {
+      try {
+        // Check if process exists
+        process.kill(pid, 0);
+        
+        // Process exists, try to kill it
+        consoleOutput.warning(`Stopping server process (PID: ${pid})...`);
+        process.kill(pid, 'SIGTERM');
+        
+        // Give it time to gracefully shutdown
+        let attempts = 0;
+        while (attempts < 50) { // 5 seconds
+          try {
+            process.kill(pid, 0); // Check if still running
+            await new Promise(resolve => setTimeout(resolve, 100));
+            attempts++;
+          } catch {
+            // Process no longer exists
+            break;
+          }
+        }
+        
+        // If still running, force kill
+        try {
+          process.kill(pid, 0);
+          consoleOutput.warning('Server did not stop gracefully, forcing shutdown...');
+          process.kill(pid, 'SIGKILL');
+        } catch {
+          // Process already gone
+        }
+        
+        this.removePidFile();
+        consoleOutput.success('✅ Camille server stopped');
+      } catch (error: any) {
+        if (error.code === 'ESRCH') {
+          // Process doesn't exist
+          consoleOutput.warning('Server process not found, cleaning up PID file...');
+          this.removePidFile();
+        } else if (error.code === 'EPERM') {
+          // Permission denied
+          throw new Error(`Permission denied to stop server process (PID: ${pid})`);
+        } else {
+          throw error;
+        }
+      }
+    } else {
+      consoleOutput.warning('No running Camille server found');
+    }
+  }
+  
+  /**
+   * Checks if a server is running by checking the PID file
+   */
+  private static isServerRunning(): boolean {
+    const pid = this.readPidFile();
+    if (!pid) return false;
+    
+    try {
+      // Check if process exists
+      process.kill(pid, 0);
+      return true;
+    } catch {
+      // Process doesn't exist, clean up stale PID file
+      this.removePidFile();
+      return false;
+    }
+  }
+  
+  /**
+   * Writes the current process PID to file
+   */
+  private static writePidFile(): void {
+    const dir = path.dirname(this.pidFilePath);
+    if (!fs.existsSync(dir)) {
+      fs.mkdirSync(dir, { recursive: true });
+    }
+    fs.writeFileSync(this.pidFilePath, process.pid.toString());
+    logger.info('PID file created', { pid: process.pid, file: this.pidFilePath });
+  }
+  
+  /**
+   * Reads the PID from file
+   */
+  private static readPidFile(): number | null {
+    try {
+      if (fs.existsSync(this.pidFilePath)) {
+        const pid = parseInt(fs.readFileSync(this.pidFilePath, 'utf8').trim(), 10);
+        return isNaN(pid) ? null : pid;
+      }
+    } catch (error) {
+      logger.error('Failed to read PID file', error);
+    }
+    return null;
+  }
+  
+  /**
+   * Removes the PID file
+   */
+  private static removePidFile(): void {
+    try {
+      if (fs.existsSync(this.pidFilePath)) {
+        fs.unlinkSync(this.pidFilePath);
+      }
+    } catch (error) {
+      logger.error('Failed to remove PID file', error);
     }
   }
 }

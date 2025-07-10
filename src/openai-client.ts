@@ -8,6 +8,7 @@ import { CamilleConfig } from './config';
 import { FILE_READER_TOOL } from './prompts';
 import * as fs from 'fs';
 import * as path from 'path';
+import { logger } from './logger';
 
 /**
  * Result from a code review
@@ -33,6 +34,10 @@ export class OpenAIClient {
     this.client = new OpenAI({ apiKey });
     this.config = config;
     this.workingDirectory = workingDirectory;
+    logger.debug('OpenAI client initialized', { 
+      models: config.models,
+      workingDirectory 
+    });
   }
 
   /**
@@ -44,6 +49,12 @@ export class OpenAIClient {
     useDetailedModel: boolean = true
   ): Promise<ReviewResult> {
     const model = useDetailedModel ? this.config.models.review : this.config.models.quick;
+    
+    logger.info('Starting code review', { 
+      model, 
+      useDetailedModel,
+      promptLength: userPrompt.length 
+    });
 
     try {
       const response = await this.client.chat.completions.create({
@@ -80,9 +91,21 @@ export class OpenAIClient {
       }
 
       const content = finalResponse.choices[0]?.message?.content || '';
-      return this.parseReviewResult(content);
+      const result = this.parseReviewResult(content);
+      
+      logger.info('Code review completed', {
+        model,
+        approvalStatus: result.approvalStatus,
+        securityIssues: result.securityIssues.length,
+        complianceViolations: result.complianceViolations.length,
+        codeQualityIssues: result.codeQualityIssues.length,
+        tokensUsed: finalResponse.usage?.total_tokens
+      });
+      
+      return result;
 
     } catch (error) {
+      logger.error('Code review failed', error, { model });
       if (error instanceof Error) {
         throw new Error(`OpenAI API error: ${error.message}`);
       }
@@ -100,19 +123,25 @@ export class OpenAIClient {
       if (toolCall.function.name === 'read_file') {
         const args = JSON.parse(toolCall.function.arguments);
         const filePath = path.join(this.workingDirectory, args.path);
+        logger.debug('Tool call: read_file', { path: args.path, fullPath: filePath });
         
         let content: string;
         try {
           if (fs.existsSync(filePath)) {
             content = fs.readFileSync(filePath, 'utf8');
             // Truncate very large files
-            if (content.length > 50000) {
-              content = content.substring(0, 50000) + '\n\n[... file truncated ...]';
+            const maxFileSize = this.config.maxFileSize || 200000; // Default 200KB instead of 50KB
+            if (content.length > maxFileSize) {
+              logger.info('Truncating large file', { path: args.path, size: content.length, maxSize: maxFileSize });
+              content = content.substring(0, maxFileSize) + '\n\n[... file truncated ...]';
             }
+            logger.debug('File read successfully', { path: args.path, size: content.length });
           } else {
+            logger.warn('File not found for tool call', { path: args.path });
             content = `File not found: ${args.path}`;
           }
         } catch (error) {
+          logger.error('Error reading file for tool call', error, { path: args.path });
           content = `Error reading file: ${error}`;
         }
 
@@ -192,6 +221,12 @@ export class OpenAIClient {
    * Generates embeddings for code content
    */
   async generateEmbedding(content: string): Promise<number[]> {
+    const startTime = Date.now();
+    logger.debug('Generating embedding', { 
+      model: this.config.models.embedding, 
+      inputLength: content.length 
+    });
+    
     try {
       const response = await this.client.embeddings.create({
         model: this.config.models.embedding,
@@ -199,8 +234,23 @@ export class OpenAIClient {
         encoding_format: 'float'
       });
 
+      const duration = Date.now() - startTime;
+      logger.info('Embedding generated successfully', {
+        model: this.config.models.embedding,
+        duration,
+        tokensUsed: response.usage?.total_tokens
+      });
+      logger.logOpenAICall(this.config.models.embedding, response.usage?.total_tokens || 0, duration, true);
+
       return response.data[0].embedding;
     } catch (error) {
+      const duration = Date.now() - startTime;
+      logger.error('Embedding generation failed', error, { 
+        model: this.config.models.embedding,
+        duration 
+      });
+      logger.logOpenAICall(this.config.models.embedding, 0, duration, false);
+      
       if (error instanceof Error) {
         throw new Error(`Embedding generation error: ${error.message}`);
       }
@@ -212,16 +262,39 @@ export class OpenAIClient {
    * Performs a simple completion without tools
    */
   async complete(prompt: string, model?: string): Promise<string> {
+    const startTime = Date.now();
+    const actualModel = model || this.config.models.quick;
+    logger.debug('Starting completion', { 
+      model: actualModel, 
+      promptLength: prompt.length 
+    });
+    
     try {
       const response = await this.client.chat.completions.create({
-        model: model || this.config.models.quick,
+        model: actualModel,
         messages: [{ role: 'user', content: prompt }],
         temperature: this.config.temperature,
         max_tokens: this.config.maxTokens
       });
 
+      const duration = Date.now() - startTime;
+      logger.info('Completion successful', {
+        model: actualModel,
+        duration,
+        tokensUsed: response.usage?.total_tokens,
+        responseLength: response.choices[0]?.message?.content?.length || 0
+      });
+      logger.logOpenAICall(actualModel, response.usage?.total_tokens || 0, duration, true);
+
       return response.choices[0]?.message?.content || '';
     } catch (error) {
+      const duration = Date.now() - startTime;
+      logger.error('Completion failed', error, { 
+        model: actualModel,
+        duration 
+      });
+      logger.logOpenAICall(actualModel, 0, duration, false);
+      
       if (error instanceof Error) {
         throw new Error(`OpenAI API error: ${error.message}`);
       }

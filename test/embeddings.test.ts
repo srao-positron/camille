@@ -2,6 +2,9 @@
  * Tests for embeddings functionality
  */
 
+// Mock fs module before imports
+jest.mock('fs');
+
 import { EmbeddingsIndex, FileFilter } from '../src/embeddings';
 import { ConfigManager } from '../src/config';
 import * as fs from 'fs';
@@ -23,18 +26,17 @@ describe('EmbeddingsIndex', () => {
       configDir: testDir
     } as any;
 
-    // Clean test directory
-    if (fs.existsSync(testDir)) {
-      fs.rmSync(testDir, { recursive: true });
-    }
+    // Setup fs mocks
+    (fs.existsSync as jest.Mock).mockReturnValue(false);
+    (fs.mkdirSync as jest.Mock).mockImplementation(() => {});
+    (fs.readFileSync as jest.Mock).mockImplementation(() => '{}');
+    (fs.writeFileSync as jest.Mock).mockImplementation(() => {});
 
     embeddingsIndex = new EmbeddingsIndex(configManager);
   });
 
   afterEach(() => {
-    if (fs.existsSync(testDir)) {
-      fs.rmSync(testDir, { recursive: true });
-    }
+    jest.clearAllMocks();
   });
 
   describe('addEmbedding', () => {
@@ -43,10 +45,10 @@ describe('EmbeddingsIndex', () => {
       const embedding = new Array(1536).fill(0.1);
       const content = 'test content';
 
-      // Create mock file
-      jest.spyOn(fs, 'statSync').mockReturnValue({
+      // Mock fs methods
+      (fs.statSync as jest.Mock).mockReturnValue({
         mtimeMs: 123456789
-      } as any);
+      });
 
       embeddingsIndex.addEmbedding(testFile, embedding, content, 'test summary');
 
@@ -59,9 +61,9 @@ describe('EmbeddingsIndex', () => {
       const embedding1 = new Array(1536).fill(0.1);
       const embedding2 = new Array(1536).fill(0.2);
 
-      jest.spyOn(fs, 'statSync').mockReturnValue({
+      (fs.statSync as jest.Mock).mockReturnValue({
         mtimeMs: 123456789
-      } as any);
+      });
 
       embeddingsIndex.addEmbedding(testFile, embedding1, 'content1');
       embeddingsIndex.addEmbedding(testFile, embedding2, 'content2');
@@ -72,9 +74,9 @@ describe('EmbeddingsIndex', () => {
 
   describe('search', () => {
     beforeEach(() => {
-      jest.spyOn(fs, 'statSync').mockReturnValue({
+      (fs.statSync as jest.Mock).mockReturnValue({
         mtimeMs: 123456789
-      } as any);
+      });
 
       // Add test files with different embeddings
       const files = [
@@ -124,15 +126,15 @@ describe('EmbeddingsIndex', () => {
     it('should return true for modified file', () => {
       const testFile = '/test/file.js';
       
-      jest.spyOn(fs, 'statSync').mockReturnValue({
+      (fs.statSync as jest.Mock).mockReturnValue({
         mtimeMs: 100
-      } as any);
-      jest.spyOn(fs, 'readFileSync').mockReturnValue('original content');
+      });
+      (fs.readFileSync as jest.Mock).mockReturnValue('original content');
 
       embeddingsIndex.addEmbedding(testFile, [1, 0, 0, 0], 'original content');
 
       // Mock file change
-      jest.spyOn(fs, 'readFileSync').mockReturnValue('modified content');
+      (fs.readFileSync as jest.Mock).mockReturnValue('modified content');
 
       expect(embeddingsIndex.needsReindex(testFile)).toBe(true);
     });
@@ -141,10 +143,10 @@ describe('EmbeddingsIndex', () => {
       const testFile = '/test/file.js';
       const content = 'same content';
       
-      jest.spyOn(fs, 'statSync').mockReturnValue({
+      (fs.statSync as jest.Mock).mockReturnValue({
         mtimeMs: 100
-      } as any);
-      jest.spyOn(fs, 'readFileSync').mockReturnValue(content);
+      });
+      (fs.readFileSync as jest.Mock).mockReturnValue(content);
 
       embeddingsIndex.addEmbedding(testFile, [1, 0, 0, 0], content);
 
@@ -164,14 +166,17 @@ describe('EmbeddingsIndex', () => {
 
       const cachingIndex = new EmbeddingsIndex(cachingConfig);
       
-      jest.spyOn(fs, 'statSync').mockReturnValue({
+      (fs.statSync as jest.Mock).mockReturnValue({
         mtimeMs: 123456789
-      } as any);
+      });
 
       cachingIndex.addEmbedding('/test/file.js', [1, 0, 0, 0], 'content');
 
-      const cacheFile = path.join(testDir, 'embeddings-cache', 'index.json');
-      expect(fs.existsSync(cacheFile)).toBe(true);
+      // Verify writeFileSync was called with cache file
+      expect(fs.writeFileSync).toHaveBeenCalled();
+      const calls = (fs.writeFileSync as jest.Mock).mock.calls;
+      const cacheCall = calls.find(call => call[0].includes('embeddings-cache'));
+      expect(cacheCall).toBeDefined();
     });
   });
 });

@@ -2,15 +2,60 @@
  * Tests for multi-directory server functionality
  */
 
+// Mock dependencies BEFORE imports
+jest.mock('../src/openai-client');
+
+// Create chokidar mock
+const EventEmitter = require('events').EventEmitter;
+const mockWatch = jest.fn();
+jest.mock('chokidar', () => {
+  class FSWatcher extends EventEmitter {
+    constructor() {
+      super();
+      this.closed = false;
+    }
+    close() {
+      this.closed = true;
+      this.emit('close');
+      this.removeAllListeners();
+    }
+    add(paths: any) {
+      return this;
+    }
+    unwatch(paths: any) {
+      return this;
+    }
+    getWatched() {
+      return {};
+    }
+  }
+  
+  mockWatch.mockImplementation((paths: any, options: any) => {
+    const watcher = new FSWatcher();
+    if (!options?.ignoreInitial) {
+      setImmediate(() => {
+        if (typeof paths === 'string') {
+          watcher.emit('add', paths);
+        } else if (Array.isArray(paths)) {
+          paths.forEach((p: string) => watcher.emit('add', p));
+        }
+        watcher.emit('ready');
+      });
+    }
+    return watcher;
+  });
+  
+  return {
+    watch: mockWatch,
+    FSWatcher
+  };
+});
+
 import { CamilleServer, ServerManager } from '../src/server';
 import { ConfigManager } from '../src/config';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-
-// Mock dependencies
-jest.mock('../src/openai-client');
-jest.mock('chokidar');
 
 describe('Multi-Directory Server Functionality', () => {
   let server: CamilleServer;
@@ -19,7 +64,14 @@ describe('Multi-Directory Server Functionality', () => {
   let testDir2: string;
   let testDir3: string;
 
+
   beforeEach(() => {
+    // Reset ServerManager instance
+    (ServerManager as any).instance = undefined;
+    
+    // Set up test config directory
+    process.env.CAMILLE_CONFIG_DIR = path.join(os.tmpdir(), '.camille-test-server');
+    
     // Set up test directories
     testBaseDir = path.join(os.tmpdir(), 'camille-test-multi');
     testDir1 = path.join(testBaseDir, 'project1');
@@ -64,12 +116,26 @@ describe('Multi-Directory Server Functionality', () => {
 
   afterEach(async () => {
     // Clean up
-    await ServerManager.stop();
+    try {
+      await ServerManager.stop();
+    } catch (error) {
+      // Ignore if server not running
+    }
+    
+    // Clean up PID file
+    const pidFile = path.join(
+      process.env.CAMILLE_CONFIG_DIR || path.join(os.homedir(), '.camille'),
+      'server.pid'
+    );
+    if (fs.existsSync(pidFile)) {
+      fs.unlinkSync(pidFile);
+    }
     
     if (fs.existsSync(testBaseDir)) {
       fs.rmSync(testBaseDir, { recursive: true });
     }
     
+    delete process.env.CAMILLE_CONFIG_DIR;
     jest.restoreAllMocks();
   });
 
@@ -149,7 +215,10 @@ describe('Multi-Directory Server Functionality', () => {
       await server.addDirectory('./project3');
       
       const status = server.getStatus();
-      expect(status.watchedDirectories).toContain(testDir3);
+      // Normalize paths to handle macOS symlinks (e.g., /var -> /private/var)
+      const normalizedWatchedDirs = status.watchedDirectories.map(dir => fs.realpathSync(dir));
+      const normalizedTestDir3 = fs.realpathSync(testDir3);
+      expect(normalizedWatchedDirs).toContain(normalizedTestDir3);
       
       process.chdir(cwd);
     });
@@ -309,8 +378,12 @@ describe('Multi-Directory Server Functionality', () => {
 
     it('should maintain singleton instance', async () => {
       const instance1 = await ServerManager.start(testDir1);
-      const instance2 = await ServerManager.start(testDir2); // Should not change directories
       
+      // Second start should throw error
+      await expect(ServerManager.start(testDir2)).rejects.toThrow('Camille server is already running');
+      
+      // Get instance should return same instance
+      const instance2 = ServerManager.getInstance();
       expect(instance1).toBe(instance2);
       expect(instance1.getWatchedDirectories()).toHaveLength(1);
       expect(instance1.getWatchedDirectories()[0]).toBe(testDir1);

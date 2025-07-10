@@ -10,7 +10,7 @@ An intelligent code compliance checker and embedding search tool for Claude Code
 - **🪝 Claude Code Hook Integration**: Seamlessly integrates with Claude Code to review changes before they're applied
 - **🤖 MCP Server**: Provides tools to Claude for searching code and validating changes
 - **📁 Smart File Watching**: Automatically indexes new and changed files in real-time
-- **⚡ Performance Optimized**: Uses GPT-4o mini for routine checks and GPT-4 Turbo for complex analysis
+- **⚡ Performance Optimized**: Uses GPT-4.1-mini for routine checks and GPT-4.1 for complex analysis
 
 ## Installation
 
@@ -30,7 +30,21 @@ npm link
 
 ## Quick Start
 
-### 1. Set your OpenAI API key
+### 1. Run the setup wizard (recommended)
+```bash
+camille setup
+```
+
+This interactive wizard will help you:
+- Configure your OpenAI API key
+- Select directories to monitor
+- Set up Claude Code hooks
+- Configure MCP integration
+- Enable auto-start service
+
+### Or configure manually:
+
+#### Set your OpenAI API key
 ```bash
 camille set-key YOUR_OPENAI_API_KEY
 ```
@@ -52,7 +66,39 @@ Add this to your Claude Code settings:
 }
 ```
 
-### 3. Start the server (optional, for search functionality)
+### 3. Configure MCP Server in Claude Code (for search functionality)
+
+Create a `.mcp.json` file in your project root:
+
+```json
+{
+  "mcpServers": {
+    "camille": {
+      "command": "camille",
+      "args": ["server", "start", "--mcp"]
+    }
+  }
+}
+```
+
+Or if you want to watch a specific directory:
+```json
+{
+  "mcpServers": {
+    "camille": {
+      "command": "camille",
+      "args": ["server", "start", "--mcp", "-d", "/path/to/project"]
+    }
+  }
+}
+```
+
+Quick setup: Use `camille init-mcp` to create this file automatically.
+
+The MCP server will start automatically when you open the project in Claude Code.
+
+### 4. Start the server manually (alternative to MCP)
+If you prefer to run the server standalone:
 ```bash
 camille server start --mcp
 ```
@@ -110,26 +156,99 @@ camille server remove-directory ~/projects/old-service
 
 Each directory is indexed separately, and searches will include results from all watched directories.
 
-### MCP Integration
+### MCP (Model Context Protocol) Integration
 
-When started with `--mcp`, Camille provides these tools to Claude:
+Camille can run as an MCP server, providing powerful code search and validation tools directly to Claude. This allows Claude to search your codebase semantically and validate changes before applying them.
 
-#### `camille_search_code`
-Search for code using natural language:
+#### Setting up MCP for Claude Code
+
+1. **Create a `.mcp.json` file in your project root:**
+   ```json
+   {
+     "mcpServers": {
+       "camille": {
+         "command": "camille",
+         "args": ["server", "start", "--mcp"]
+       }
+     }
+   }
+   ```
+
+2. **Or use the quick setup command:**
+   ```bash
+   # Create .mcp.json in current directory
+   camille init-mcp
+   
+   # Create .mcp.json in specific directory
+   camille init-mcp ~/my-project
+   ```
+
+3. **For multiple directories:**
+   ```json
+   {
+     "mcpServers": {
+       "camille": {
+         "command": "camille",
+         "args": ["server", "start", "--mcp", "-d", "/path/to/project1", "-d", "/path/to/project2"]
+       }
+     }
+   }
+   ```
+
+The MCP server will start automatically when you open the project in Claude Code.
+
+#### Available MCP Tools
+
+When configured as an MCP server, Claude gains access to these tools:
+
+##### `camille_search_code`
+Search for code using natural language queries. This tool uses semantic embeddings to find relevant code even if it doesn't contain exact keyword matches.
+
+**Example queries:**
 - "authentication and user login"
 - "database connection handling"
 - "error logging implementation"
+- "functions that process user input"
+- "API endpoints for user management"
 
-#### `camille_validate_changes`
-Validate code changes before applying them:
-- Checks for security vulnerabilities
-- Ensures compliance with project rules
-- Suggests improvements
+**Returns:** List of matching files with similarity scores, summaries, and code previews.
 
-#### `camille_status`
-Check if the server is running and index is ready.
+##### `camille_validate_changes`
+Validate code changes before applying them. This performs the same security and compliance checks as the hook mode.
+
+**Checks for:**
+- Security vulnerabilities (injection, XSS, authentication flaws)
+- Compliance with CLAUDE.md and project rules
+- Code quality and best practices
+- Architecture consistency
+
+**Returns:** Approval status with detailed feedback on any issues found.
+
+##### `camille_status`
+Check if the Camille server is running and the index is ready.
+
+**Returns:** Server status including:
+- Running state
+- Index readiness
+- Number of indexed files
+- Active operations
+
+#### Using MCP Tools in Claude
+
+Once configured, you can ask Claude to:
+- "Search for files related to user authentication"
+- "Find where database connections are handled"
+- "Check if this code change is secure"
+- "Validate this implementation against our coding standards"
+
+Claude will automatically use the appropriate Camille tools to help answer your questions.
 
 ### Configuration
+
+Re-run the setup wizard anytime:
+```bash
+camille setup
+```
 
 View current configuration:
 ```bash

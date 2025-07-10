@@ -9,6 +9,7 @@ import { CamilleHook } from './hook';
 import { SearchResult } from './embeddings';
 import { OpenAIClient } from './openai-client';
 import { ConfigManager } from './config';
+import { logger } from './logger';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as net from 'net';
@@ -35,11 +36,17 @@ It's particularly useful for finding:
 The search returns the most relevant files with similarity scores and summaries.
 Higher similarity scores (closer to 1.0) indicate better matches.
 
+IMPORTANT: This tool requires the Camille server to be running with an indexed codebase.
+The server must be started with: camille server start --mcp
+
 Example queries:
 - "authentication and user login"
 - "database connection handling"
 - "error logging implementation"
-- "API endpoint for user management"`,
+- "API endpoint for user management"
+- "functions that validate user input"
+- "code that handles file uploads"
+- "components that display error messages"`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -130,7 +137,7 @@ export class CamilleMCPServer {
     this.server = new MCPServerWrapper({
       name: 'camille',
       version: '0.1.0',
-      description: 'Intelligent code compliance checker and search tool'
+      description: 'Intelligent code compliance checker and search tool for Claude Code. Provides semantic code search using OpenAI embeddings and security-focused code validation.'
     });
 
     // Use named pipe path
@@ -183,8 +190,11 @@ export class CamilleMCPServer {
 
     const embeddingsIndex = server.getEmbeddingsIndex();
     if (!embeddingsIndex.isIndexReady()) {
+      logger.info('Search attempted while index not ready');
       return {
-        error: 'Index is still building. Please wait for initial indexing to complete.'
+        error: 'Index is still building. Please wait for initial indexing to complete.',
+        status: 'indexing',
+        hint: 'The server is currently indexing files. This usually takes a few seconds depending on the project size.'
       };
     }
 
@@ -337,7 +347,7 @@ export class CamilleMCPServer {
 
     // Create named pipe server
     this.pipeServer = net.createServer((socket) => {
-      console.log('MCP client connected');
+      logger.info('MCP client connected');
       
       socket.on('data', async (data) => {
         try {
@@ -345,14 +355,14 @@ export class CamilleMCPServer {
           const response = await this.server.handleRequest(message);
           socket.write(JSON.stringify(response) + '\n');
         } catch (error) {
-          console.error('MCP error:', error);
+          logger.error('MCP error', error);
           const errorMessage = error instanceof Error ? error.message : String(error);
           socket.write(JSON.stringify({ error: errorMessage }) + '\n');
         }
       });
 
       socket.on('end', () => {
-        console.log('MCP client disconnected');
+        logger.info('MCP client disconnected');
       });
     });
 
@@ -361,7 +371,7 @@ export class CamilleMCPServer {
         if (error) {
           reject(error);
         } else {
-          console.log(`MCP server listening on: ${this.pipePath}`);
+          logger.info(`MCP server listening on: ${this.pipePath}`);
           resolve();
         }
       });

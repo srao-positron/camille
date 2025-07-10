@@ -7,8 +7,10 @@
 
 import { Command } from 'commander';
 import chalk from 'chalk';
+import inquirer from 'inquirer';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { ConfigManager } from './config';
 import { ServerManager } from './server';
 import { CamilleMCPServer } from './mcp-server';
@@ -56,21 +58,58 @@ const server = program
 server
   .command('start')
   .description('Start the Camille server with file watching and indexing')
-  .option('-d, --directory <path...>', 'Directories to watch and index (can specify multiple)', [process.cwd()])
+  .option('-d, --directory <path...>', 'Directories to watch and index (can specify multiple)')
   .option('--mcp', 'Also start the MCP server', false)
+  .option('-q, --quiet', 'Suppress console output (daemon mode)', false)
   .action(async (options) => {
     try {
+      // Determine which directories to watch
+      let directoriesToWatch: string[];
+      
+      if (options.directory && options.directory.length > 0) {
+        // Use explicitly provided directories
+        directoriesToWatch = options.directory;
+      } else {
+        // Try to use configured directories
+        const configManager = new ConfigManager();
+        const config = configManager.getConfig();
+        
+        if (config.watchedDirectories && config.watchedDirectories.length > 0) {
+          directoriesToWatch = config.watchedDirectories;
+          if (!options.quiet) {
+            console.log(chalk.gray('Using configured directories from ~/.camille/config.json'));
+          }
+        } else {
+          // Fall back to current directory
+          directoriesToWatch = [process.cwd()];
+          if (!options.quiet) {
+            console.log(chalk.gray('No directories configured, using current directory'));
+          }
+        }
+      }
+      
+      // Set quiet mode if requested
+      if (options.quiet) {
+        process.env.CAMILLE_QUIET = 'true';
+      }
+      
       // Start the main server with directories
-      await ServerManager.start(options.directory);
+      await ServerManager.start(directoriesToWatch);
+      
+      // Let user know the server is ready for searches
+      if (!options.quiet) {
+        console.log(chalk.gray('\nServer is ready. You can now use MCP tools to search the indexed codebase.'));
+      }
 
       // Start MCP server if requested
       if (options.mcp) {
         const mcpServer = new CamilleMCPServer();
         await mcpServer.start();
         
-        console.log(chalk.blue('\n📡 MCP Server Configuration:'));
-        console.log(chalk.gray('Add this to your Claude Code settings:'));
-        console.log(chalk.yellow(`
+        if (!options.quiet) {
+          console.log(chalk.blue('\n📡 MCP Server Configuration:'));
+          console.log(chalk.gray('Add this to your Claude Code settings:'));
+          console.log(chalk.yellow(`
 {
   "mcpServers": {
     "camille": {
@@ -80,13 +119,42 @@ server
   }
 }
 `));
+        }
       }
 
-      // Keep the process running
-      process.on('SIGINT', async () => {
-        console.log(chalk.yellow('\nShutting down...'));
+      // Keep the process running and handle various termination signals
+      const shutdown = async (signal: string) => {
+        if (!options.quiet) {
+          console.log(chalk.yellow(`\nReceived ${signal}, shutting down...`));
+        }
         await ServerManager.stop();
         process.exit(0);
+      };
+      
+      process.on('SIGINT', () => shutdown('SIGINT'));
+      process.on('SIGTERM', () => shutdown('SIGTERM'));
+      process.on('SIGHUP', () => shutdown('SIGHUP'));
+      
+      // Clean up on unexpected exit
+      process.on('exit', () => {
+        // Synchronous cleanup only
+        try {
+          const fs = require('fs');
+          const path = require('path');
+          const os = require('os');
+          const pidFile = path.join(
+            process.env.CAMILLE_CONFIG_DIR || path.join(os.homedir(), '.camille'),
+            'server.pid'
+          );
+          if (fs.existsSync(pidFile)) {
+            const pid = parseInt(fs.readFileSync(pidFile, 'utf8').trim(), 10);
+            if (pid === process.pid) {
+              fs.unlinkSync(pidFile);
+            }
+          }
+        } catch {
+          // Ignore errors during cleanup
+        }
       });
 
     } catch (error) {
@@ -110,16 +178,86 @@ server
 server
   .command('status')
   .description('Check server status')
-  .action(() => {
+  .option('--test-pipe', 'Test MCP pipe connection')
+  .action(async (options: any) => {
+    // Test pipe connection if requested
+    if (options.testPipe) {
+      const pipePath = process.platform === 'win32' 
+        ? '\\\\.\\pipe\\camille-mcp'
+        : path.join(os.tmpdir(), 'camille-mcp.sock');
+      
+      console.log(chalk.blue('Testing MCP pipe connection...'));
+      console.log(chalk.gray(`Pipe path: ${pipePath}`));
+      
+      try {
+        const net = require('net');
+        const client = net.createConnection(pipePath);
+        
+        await new Promise<void>((resolve, reject) => {
+          client.on('connect', () => {
+            console.log(chalk.green('✅ Successfully connected to MCP pipe'));
+            console.log(chalk.gray('The central Camille service is running and accepting connections'));
+            client.end();
+            resolve();
+          });
+          
+          client.on('error', (err: any) => {
+            if (err.code === 'ENOENT' || err.code === 'ECONNREFUSED') {
+              console.log(chalk.red('❌ Could not connect to MCP pipe'));
+              console.log(chalk.yellow('Make sure the Camille server is running with --mcp flag:'));
+              console.log(chalk.cyan('  camille server start --mcp'));
+            } else {
+              console.log(chalk.red(`❌ Connection error: ${err.message}`));
+            }
+            reject(err);
+          });
+          
+          // Timeout after 2 seconds
+          setTimeout(() => {
+            client.destroy();
+            reject(new Error('Connection timeout'));
+          }, 2000);
+        });
+      } catch (error) {
+        // Error already logged
+      }
+      
+      return;
+    }
+    
     const instance = ServerManager.getInstance();
+    
+    // Check for PID file if no local instance
     if (!instance) {
+      const pidFilePath = path.join(
+        process.env.CAMILLE_CONFIG_DIR || path.join(require('os').homedir(), '.camille'),
+        'server.pid'
+      );
+      
+      if (fs.existsSync(pidFilePath)) {
+        try {
+          const pid = parseInt(fs.readFileSync(pidFilePath, 'utf8').trim(), 10);
+          // Check if process is running
+          process.kill(pid, 0);
+          console.log(chalk.blue('Server Status:'));
+          console.log(`  Running: ${chalk.green('Yes')} (PID: ${pid})`);
+          console.log(`  Note: Server is running in another process. Use "camille server stop" to stop it.`);
+          return;
+        } catch {
+          // Process not running, clean up stale PID file
+          fs.unlinkSync(pidFilePath);
+          console.log(chalk.yellow('Server is not running (cleaned up stale PID file)'));
+          return;
+        }
+      }
+      
       console.log(chalk.yellow('Server is not running'));
       return;
     }
 
     const status = instance.getStatus();
     console.log(chalk.blue('Server Status:'));
-    console.log(`  Running: ${status.isRunning ? chalk.green('Yes') : chalk.red('No')}`);
+    console.log(`  Running: ${status.isRunning ? chalk.green('Yes') : chalk.red('No')} (PID: ${process.pid})`);
     console.log(`  Indexing: ${status.isIndexing ? chalk.yellow('In progress') : chalk.green('Complete')}`);
     console.log(`  Files indexed: ${chalk.cyan(status.indexSize)}`);
     console.log(`  Queue size: ${chalk.cyan(status.queueSize)}`);
@@ -254,28 +392,140 @@ program
   });
 
 /**
- * Help command
+ * Init MCP command
  */
 program
-  .command('help')
-  .description('Show detailed help information')
-  .action(() => {
-    const helpPath = path.join(__dirname, '..', 'README.md');
-    if (fs.existsSync(helpPath)) {
-      const readme = fs.readFileSync(helpPath, 'utf8');
-      // Convert markdown to plain text (basic conversion)
-      const plainText = readme
-        .replace(/^#+\s+/gm, '')
-        .replace(/\*\*([^*]+)\*\*/g, '$1')
-        .replace(/\*([^*]+)\*/g, '$1')
-        .replace(/`([^`]+)`/g, '$1')
-        .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+  .command('init-mcp [directory]')
+  .description('Create .mcp.json file in a directory')
+  .action(async (directory?: string) => {
+    const targetDir = directory ? path.resolve(directory) : process.cwd();
+    
+    if (!fs.existsSync(targetDir) || !fs.statSync(targetDir).isDirectory()) {
+      console.error(chalk.red('Error: Not a valid directory'));
+      process.exit(1);
+    }
+    
+    const mcpPath = path.join(targetDir, '.mcp.json');
+    
+    if (fs.existsSync(mcpPath)) {
+      const { overwrite } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'overwrite',
+        message: '.mcp.json already exists. Overwrite?',
+        default: false
+      }]);
       
-      console.log(plainText);
+      if (!overwrite) {
+        console.log(chalk.gray('Cancelled'));
+        return;
+      }
+    }
+    
+    // Use named pipe connection to central service
+    const pipePath = process.platform === 'win32' 
+      ? '\\\\.\\pipe\\camille-mcp'
+      : path.join(os.tmpdir(), 'camille-mcp.sock');
+      
+    const mcpConfig = {
+      mcpServers: {
+        camille: {
+          transport: "pipe",
+          pipeName: pipePath
+        }
+      }
+    };
+    
+    fs.writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2));
+    console.log(chalk.green(`✅ Created .mcp.json in ${targetDir}`));
+    console.log(chalk.gray('\nCamille will use the API key from ~/.camille/config.json'));
+  });
+
+/**
+ * Help command with subcommands
+ */
+const help = program
+  .command('help [topic]')
+  .description('Show detailed help information')
+  .action((topic?: string) => {
+    if (topic === 'mcp') {
+      showMCPHelp();
     } else {
-      program.help();
+      const helpPath = path.join(__dirname, '..', 'README.md');
+      if (fs.existsSync(helpPath)) {
+        const readme = fs.readFileSync(helpPath, 'utf8');
+        // Convert markdown to plain text (basic conversion)
+        const plainText = readme
+          .replace(/^#+\s+/gm, '')
+          .replace(/\*\*([^*]+)\*\*/g, '$1')
+          .replace(/\*([^*]+)\*/g, '$1')
+          .replace(/`([^`]+)`/g, '$1')
+          .replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+        
+        console.log(plainText);
+      } else {
+        program.help();
+      }
     }
   });
+
+/**
+ * Show MCP-specific help
+ */
+function showMCPHelp() {
+  console.log(chalk.blue.bold('\n🤖 MCP (Model Context Protocol) Setup Guide\n'));
+  
+  console.log(chalk.yellow('What is MCP?'));
+  console.log('MCP allows Claude to use Camille\'s code search and validation tools directly.');
+  console.log('When configured, you can ask Claude to search your codebase or validate changes.\n');
+  
+  console.log(chalk.yellow('How it works:'));
+  console.log('• One central Camille server runs as a system service');
+  console.log('• Each project\'s .mcp.json connects Claude Code to this central service');
+  console.log('• Claude Code uses a named pipe - no new servers are spawned');
+  console.log('• All projects share the same indexed codebase\n');
+  
+  console.log(chalk.yellow('Setup Instructions for Claude Code:'));
+  console.log('\n1. Ensure the central Camille server is running:');
+  console.log(chalk.cyan('   camille server start --mcp\n'));
+  
+  console.log('2. Create a .mcp.json file in your project root:');
+  console.log(chalk.gray(`   {
+     "mcpServers": {
+       "camille": {
+         "transport": "pipe",
+         "pipeName": "${process.platform === 'win32' ? '\\\\.\\pipe\\camille-mcp' : '/tmp/camille-mcp.sock'}"
+       }
+     }
+   }\n`));
+  
+  console.log('3. Or use the quick setup command:');
+  console.log(chalk.cyan('   camille init-mcp\n'));
+  
+  console.log(chalk.yellow('Project vs User Scope:'));
+  console.log('• Project scope (default): .mcp.json in project root - shared with team');
+  console.log('• User scope: Add "scope": "user" to configuration - personal only\n');
+  
+  console.log(chalk.yellow('Available MCP Tools:'));
+  console.log('\n• ' + chalk.green('camille_search_code'));
+  console.log('  Search for code using natural language');
+  console.log('  Example: "Find authentication code"\n');
+  
+  console.log('• ' + chalk.green('camille_validate_changes'));
+  console.log('  Validate code changes for security and compliance');
+  console.log('  Example: "Check if this code is secure"\n');
+  
+  console.log('• ' + chalk.green('camille_status'));
+  console.log('  Check server and index status');
+  console.log('  Example: "Is Camille running?"\n');
+  
+  console.log(chalk.yellow('Troubleshooting:'));
+  console.log('• Ensure Camille is installed globally: npm install -g camille');
+  console.log('• Check logs at: /tmp/camille.log');
+  console.log('• Verify API key is set: camille config show');
+  console.log('• API key is loaded from ~/.camille/config.json automatically\n');
+  
+  console.log(chalk.dim('For more details, see: https://github.com/srao-positron/camille/blob/main/docs/mcp-setup.md'));
+}
 
 /**
  * Default action

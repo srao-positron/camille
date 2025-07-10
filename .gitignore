@@ -12,3 +12,4 @@ coverage/
 *.swp
 *.swo
 .nyc_output/
+*.tgz

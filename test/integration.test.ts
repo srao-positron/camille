@@ -28,9 +28,6 @@ describeIf('Integration Tests (requires OpenAI API key)', () => {
     }
     fs.mkdirSync(testDir, { recursive: true });
 
-    // Mock home directory for test isolation
-    jest.spyOn(os, 'homedir').mockReturnValue(testDir);
-
     // Set up config with test API key
     configManager = new ConfigManager();
     if (OPENAI_API_KEY) {
@@ -43,7 +40,6 @@ describeIf('Integration Tests (requires OpenAI API key)', () => {
     if (fs.existsSync(testDir)) {
       fs.rmSync(testDir, { recursive: true });
     }
-    jest.restoreAllMocks();
   });
 
   describe('Server Mode', () => {

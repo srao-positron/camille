@@ -126,7 +126,8 @@ describe('CLI Multi-Directory Commands', () => {
     it('should show updated start help', async () => {
       const result = await runCommand(['server', 'start', '--help']);
       
-      expect(result.stdout).toContain('can specify multiple');
+      expect(result.stdout).toContain('Directories to watch and index');
+      expect(result.stdout).toContain('-d, --directory <path...>');
     });
   });
 });

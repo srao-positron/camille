@@ -12,15 +12,13 @@ describe('ConfigManager', () => {
   const testConfigDir = path.join(os.tmpdir(), '.camille-test');
   
   beforeEach(() => {
-    // Mock home directory
-    jest.spyOn(os, 'homedir').mockReturnValue(os.tmpdir());
-    
     // Clean up test directory
     if (fs.existsSync(testConfigDir)) {
       fs.rmSync(testConfigDir, { recursive: true });
     }
     
-    // Set test environment variable
+    // Set test environment variables
+    process.env.CAMILLE_CONFIG_DIR = testConfigDir;
     process.env.OPENAI_API_KEY = 'test-key-from-env';
     
     configManager = new ConfigManager();
@@ -32,7 +30,7 @@ describe('ConfigManager', () => {
       fs.rmSync(testConfigDir, { recursive: true });
     }
     delete process.env.OPENAI_API_KEY;
-    jest.restoreAllMocks();
+    delete process.env.CAMILLE_CONFIG_DIR;
   });
 
   describe('initialization', () => {
@@ -46,10 +44,13 @@ describe('ConfigManager', () => {
 
     it('should use default configuration values', () => {
       const config = configManager.getConfig();
-      expect(config.models.review).toBe('gpt-4-turbo-preview');
-      expect(config.models.quick).toBe('gpt-4o-mini');
-      expect(config.models.embedding).toBe('text-embedding-3-small');
+      expect(config.models.review).toBe('gpt-4.1');
+      expect(config.models.quick).toBe('gpt-4.1-mini');
+      expect(config.models.embedding).toBe('text-embedding-3-large');
       expect(config.temperature).toBe(0.1);
+      expect(config.maxTokens).toBe(4000);
+      expect(config.maxFileSize).toBe(200000);
+      expect(config.maxIndexFileSize).toBe(500000);
       expect(config.cacheToDisk).toBe(false);
     });
   });

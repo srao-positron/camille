@@ -6,6 +6,8 @@ This document contains specific instructions for Claude when working on the Cami
 
 Camille is a security-focused code review and search tool that integrates with Claude Code through hooks and MCP. It uses OpenAI's API to validate code changes against project rules and security best practices.
 
+**IMPORTANT**: This project is specifically for Claude Code integration, NOT Claude Desktop. All documentation, code comments, and references should mention "Claude Code" exclusively. Never reference "Claude Desktop" in any context.
+
 ## Core Principles
 
 1. **Security First**: All code changes must prioritize security. Never introduce code that could expose secrets, create vulnerabilities, or bypass security checks.
@@ -155,6 +157,7 @@ Follow conventional commits:
 3. **Security Review**: Consider security implications of all changes
 4. **Documentation**: Update relevant documentation and comments
 5. **Type Safety**: Ensure full TypeScript compliance
+6. **Claude Code Focus**: Always reference "Claude Code" not "Claude Desktop" in all contexts
 
 ## Dependencies
 

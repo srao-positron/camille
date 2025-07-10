@@ -14,12 +14,14 @@ import { config as dotenvConfig } from 'dotenv';
 export interface CamilleConfig {
   openaiApiKey?: string;
   models: {
-    review: string;      // Model for detailed code review (default: gpt-4-turbo-preview)
-    quick: string;       // Model for quick checks (default: gpt-4o-mini)
-    embedding: string;   // Model for embeddings (default: text-embedding-3-small)
+    review: string;      // Model for detailed code review (default: gpt-4.1)
+    quick: string;       // Model for quick checks (default: gpt-4.1-mini)
+    embedding: string;   // Model for embeddings (default: text-embedding-3-large)
   };
   temperature: number;   // Low temperature for consistent results (default: 0.1)
   maxTokens: number;     // Maximum tokens for responses
+  maxFileSize?: number;  // Maximum file size in bytes for tool calls (default: 200000)
+  maxIndexFileSize?: number; // Maximum file size in bytes for indexing (default: 500000)
   cacheToDisk: boolean;  // Whether to persist embeddings to disk
   ignorePatterns: string[]; // File patterns to ignore (gitignore format)
   customPrompts?: {
@@ -47,12 +49,14 @@ export interface CamilleConfig {
  */
 const DEFAULT_CONFIG: CamilleConfig = {
   models: {
-    review: 'gpt-4-turbo-preview',
-    quick: 'gpt-4o-mini',
-    embedding: 'text-embedding-3-small'
+    review: 'gpt-4.1',
+    quick: 'gpt-4.1-mini',
+    embedding: 'text-embedding-3-large'
   },
   temperature: 0.1,
   maxTokens: 4000,
+  maxFileSize: 200000,    // 200KB for tool calls
+  maxIndexFileSize: 500000, // 500KB for indexing
   cacheToDisk: false,
   ignorePatterns: [
     'node_modules/**',
@@ -73,7 +77,8 @@ export class ConfigManager {
   private config: CamilleConfig;
 
   constructor() {
-    this.configDir = path.join(os.homedir(), '.camille');
+    // Allow override for testing
+    this.configDir = process.env.CAMILLE_CONFIG_DIR || path.join(os.homedir(), '.camille');
     this.configPath = path.join(this.configDir, 'config.json');
     this.config = this.loadConfig();
   }

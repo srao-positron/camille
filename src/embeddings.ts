@@ -282,13 +282,20 @@ export class FileFilter {
    * Simple pattern matching (supports * and **)
    */
   private matchesPattern(filePath: string, pattern: string): boolean {
+    // Normalize paths for comparison
+    const normalizedPath = filePath.replace(/\\/g, '/');
+    
     // Convert glob pattern to regex
     const regexPattern = pattern
-      .replace(/\*\*/g, '.*')
+      .replace(/\\/g, '/')
+      .replace(/\*\*/g, '___DOUBLE_STAR___')
       .replace(/\*/g, '[^/]*')
-      .replace(/\?/g, '.');
+      .replace(/___DOUBLE_STAR___/g, '.*')
+      .replace(/\?/g, '.')
+      .replace(/\./g, '\\.');
     
-    const regex = new RegExp(`^${regexPattern}$`);
-    return regex.test(filePath);
+    // Match pattern anywhere in the path
+    const regex = new RegExp(regexPattern);
+    return regex.test(normalizedPath);
   }
 }
