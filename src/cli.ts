@@ -13,6 +13,8 @@ import { ConfigManager } from './config';
 import { ServerManager } from './server';
 import { CamilleMCPServer } from './mcp-server';
 import { runHook } from './hook';
+import { runSetupWizard } from './setup-wizard';
+import { logger } from './logger';
 
 const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
 
@@ -236,6 +238,22 @@ program
   });
 
 /**
+ * Setup command
+ */
+program
+  .command('setup')
+  .description('Run the interactive setup wizard')
+  .action(async () => {
+    try {
+      await runSetupWizard();
+    } catch (error) {
+      logger.error('Setup failed', error);
+      console.error(chalk.red('Setup failed:', error));
+      process.exit(1);
+    }
+  });
+
+/**
  * Help command
  */
 program
@@ -267,10 +285,40 @@ program
     program.help();
   });
 
-// Parse command line arguments
-program.parse(process.argv);
-
-// Show help if no command provided
-if (!process.argv.slice(2).length) {
-  program.help();
+// Check for first run before parsing
+async function checkFirstRun() {
+  try {
+    const configManager = new ConfigManager();
+    const config = configManager.getConfig();
+    
+    // If no API key is configured and no command specified, run setup
+    if (!config.openaiApiKey && process.argv.length === 2) {
+      console.log(chalk.yellow('\n👋 Welcome to Camille! It looks like this is your first time.'));
+      console.log(chalk.gray('Let\'s get you set up...\n'));
+      await runSetupWizard();
+      process.exit(0);
+    }
+  } catch (error) {
+    // If config doesn't exist, this is definitely first run
+    if (process.argv.length === 2) {
+      console.log(chalk.yellow('\n👋 Welcome to Camille! Let\'s get you set up.'));
+      await runSetupWizard();
+      process.exit(0);
+    }
+  }
 }
+
+// Run first-run check
+checkFirstRun().then(() => {
+  // Parse command line arguments
+  program.parse(process.argv);
+
+  // Show help if no command provided
+  if (!process.argv.slice(2).length) {
+    program.help();
+  }
+}).catch(error => {
+  logger.error('CLI error', error);
+  console.error(chalk.red('Error:', error));
+  process.exit(1);
+});
