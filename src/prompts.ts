@@ -74,7 +74,7 @@ Provide your review in the following structure:
  * Tool description for file reading capability
  */
 export const FILE_READER_TOOL = {
-  type: 'function',
+  type: 'function' as const,
   function: {
     name: 'read_file',
     description: 'Read the contents of a file in the repository. Use this to read CLAUDE.md, development rules, architecture documents, or any other files needed for context.',

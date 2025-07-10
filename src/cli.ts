@@ -54,11 +54,11 @@ const server = program
 server
   .command('start')
   .description('Start the Camille server with file watching and indexing')
-  .option('-d, --directory <path>', 'Directory to watch and index', process.cwd())
+  .option('-d, --directory <path...>', 'Directories to watch and index (can specify multiple)', [process.cwd()])
   .option('--mcp', 'Also start the MCP server', false)
   .action(async (options) => {
     try {
-      // Start the main server
+      // Start the main server with directories
       await ServerManager.start(options.directory);
 
       // Start MCP server if requested
@@ -121,6 +121,52 @@ server
     console.log(`  Indexing: ${status.isIndexing ? chalk.yellow('In progress') : chalk.green('Complete')}`);
     console.log(`  Files indexed: ${chalk.cyan(status.indexSize)}`);
     console.log(`  Queue size: ${chalk.cyan(status.queueSize)}`);
+    console.log(`  Watched directories: ${chalk.cyan(status.watchedDirectories.length)}`);
+    if (status.watchedDirectories.length > 0) {
+      status.watchedDirectories.forEach(dir => {
+        console.log(`    - ${chalk.gray(dir)}`);
+      });
+    }
+  });
+
+server
+  .command('add-directory <path...>')
+  .description('Add directories to watch')
+  .action(async (paths: string[]) => {
+    try {
+      const instance = ServerManager.getInstance();
+      if (!instance) {
+        console.log(chalk.yellow('Server is not running. Start it first with "camille server start"'));
+        return;
+      }
+
+      for (const dirPath of paths) {
+        await instance.addDirectory(dirPath);
+      }
+    } catch (error) {
+      console.error(chalk.red('Error:', error));
+      process.exit(1);
+    }
+  });
+
+server
+  .command('remove-directory <path...>')
+  .description('Remove directories from watching')
+  .action(async (paths: string[]) => {
+    try {
+      const instance = ServerManager.getInstance();
+      if (!instance) {
+        console.log(chalk.yellow('Server is not running'));
+        return;
+      }
+
+      for (const dirPath of paths) {
+        await instance.removeDirectory(dirPath);
+      }
+    } catch (error) {
+      console.error(chalk.red('Error:', error));
+      process.exit(1);
+    }
   });
 
 /**

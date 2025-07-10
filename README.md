@@ -77,15 +77,38 @@ camille server start
 # Start server with MCP integration
 camille server start --mcp
 
-# Start server in specific directory
-camille server start --directory /path/to/project
+# Start server with specific directories (supports multiple)
+camille server start -d /path/to/project1 /path/to/project2
 
-# Check server status
+# Add directories to running server
+camille server add-directory /path/to/another/project
+
+# Remove directories from watching
+camille server remove-directory /path/to/project
+
+# Check server status (shows all watched directories)
 camille server status
 
 # Stop server
 camille server stop
 ```
+
+#### Multi-Directory Support
+
+Camille can watch multiple directories simultaneously:
+
+```bash
+# Start with multiple directories
+camille server start -d ~/projects/frontend ~/projects/backend ~/projects/shared
+
+# Add more directories while running
+camille server add-directory ~/projects/new-service
+
+# Remove a directory
+camille server remove-directory ~/projects/old-service
+```
+
+Each directory is indexed separately, and searches will include results from all watched directories.
 
 ### MCP Integration
 
