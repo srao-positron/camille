@@ -3,13 +3,7 @@
  * Provides code search and validation capabilities to Claude
  */
 
-// Temporarily disable MCP until we can fix the module issue
-// import { Server } from '@modelcontextprotocol/sdk';
-const Server = class MockServer {
-  constructor(config: any) {}
-  setRequestHandler(event: string, handler: Function): void {}
-  async handleRequest(message: any): Promise<any> { return {}; }
-} as any;
+import { MCPServerWrapper, MCPServer } from './mcp-loader';
 import { ServerManager } from './server';
 import { CamilleHook } from './hook';
 import { SearchResult } from './embeddings';
@@ -126,13 +120,14 @@ Use this to check if the index is ready before performing searches.`,
  * MCP server implementation
  */
 export class CamilleMCPServer {
-  private server: any;
+  private server: MCPServer;
   private configManager: ConfigManager;
   private pipePath: string;
+  private pipeServer?: net.Server;
 
   constructor() {
     this.configManager = new ConfigManager();
-    this.server = new Server({
+    this.server = new MCPServerWrapper({
       name: 'camille',
       version: '0.1.0',
       description: 'Intelligent code compliance checker and search tool'
@@ -341,7 +336,7 @@ export class CamilleMCPServer {
     }
 
     // Create named pipe server
-    const pipeServer = net.createServer((socket) => {
+    this.pipeServer = net.createServer((socket) => {
       console.log('MCP client connected');
       
       socket.on('data', async (data) => {
@@ -362,7 +357,7 @@ export class CamilleMCPServer {
     });
 
     await new Promise<void>((resolve, reject) => {
-      pipeServer.listen(this.pipePath, (error?: Error) => {
+      this.pipeServer!.listen(this.pipePath, (error?: Error) => {
         if (error) {
           reject(error);
         } else {
@@ -371,6 +366,22 @@ export class CamilleMCPServer {
         }
       });
     });
+  }
+
+  /**
+   * Stops the MCP server
+   */
+  public async stop(): Promise<void> {
+    if (this.pipeServer) {
+      await new Promise<void>((resolve) => {
+        this.pipeServer!.close(() => resolve());
+      });
+      
+      // Clean up socket file on Unix
+      if (process.platform !== 'win32' && fs.existsSync(this.pipePath)) {
+        fs.unlinkSync(this.pipePath);
+      }
+    }
   }
 
   /**

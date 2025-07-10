@@ -33,7 +33,9 @@ describeIf('Integration Tests (requires OpenAI API key)', () => {
 
     // Set up config with test API key
     configManager = new ConfigManager();
-    configManager.setApiKey(OPENAI_API_KEY);
+    if (OPENAI_API_KEY) {
+      configManager.setApiKey(OPENAI_API_KEY);
+    }
   });
 
   afterAll(() => {
