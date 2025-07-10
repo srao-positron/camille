@@ -1,0 +1,59 @@
+{
+  "name": "camille",
+  "version": "0.1.0",
+  "description": "An intelligent code compliance checker and embedding search tool for Claude Code",
+  "main": "dist/index.js",
+  "bin": {
+    "camille": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "test": "jest",
+    "test:watch": "jest --watch",
+    "test:coverage": "jest --coverage",
+    "lint": "eslint src/**/*.ts",
+    "typecheck": "tsc --noEmit",
+    "prepublishOnly": "npm run build",
+    "postinstall": "node scripts/postinstall.js || true"
+  },
+  "keywords": [
+    "claude-code",
+    "hooks",
+    "openai",
+    "code-review",
+    "mcp",
+    "embeddings"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "chokidar": "^3.6.0",
+    "commander": "^12.0.0",
+    "dotenv": "^16.4.5",
+    "openai": "^4.67.0",
+    "glob": "^10.3.10",
+    "chalk": "^5.3.0",
+    "ora": "^8.0.1",
+    "p-queue": "^8.0.1"
+  },
+  "devDependencies": {
+    "@types/jest": "^29.5.12",
+    "@types/node": "^20.12.7",
+    "@typescript-eslint/eslint-plugin": "^7.7.0",
+    "@typescript-eslint/parser": "^7.7.0",
+    "eslint": "^8.57.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.2",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.4.5"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "dist/**/*",
+    "scripts/**/*"
+  ]
+}
