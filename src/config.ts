@@ -26,6 +26,20 @@ export interface CamilleConfig {
     system?: string;     // Custom system prompt
     review?: string;     // Custom review prompt template
   };
+  watchedDirectories?: string[]; // Directories being monitored
+  mcp?: {
+    enabled: boolean;
+    autoStart?: boolean;
+  };
+  hooks?: {
+    enabled: boolean;
+    tools?: string[];
+  };
+  autoStart?: {
+    enabled: boolean;
+    platform?: string;
+    method?: string;
+  };
 }
 
 /**

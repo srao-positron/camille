@@ -309,8 +309,8 @@ export class SetupWizard {
           }
 
           return fuzzy.filter(input || '', dirs, {
-            extract: (dir) => dir
-          }).map(result => ({
+            extract: (dir: string) => dir
+          }).map((result: any) => ({
             name: this.formatDirDisplay(result.original),
             value: result.original
           }));
@@ -346,10 +346,23 @@ export class SetupWizard {
     this.logger.info(`Searching with pattern: ${expandedPattern}`);
 
     try {
-      const matches = await glob(expandedPattern, { 
-        nodir: false,
-        onlyDirectories: true
+      // Get all matches first
+      const allMatches = await glob(expandedPattern, { 
+        nodir: false
       });
+      
+      // Filter for directories
+      const matches: string[] = [];
+      for (const match of allMatches) {
+        try {
+          const stats = await fs.promises.stat(match);
+          if (stats.isDirectory()) {
+            matches.push(match);
+          }
+        } catch {
+          // Skip items we can't stat
+        }
+      }
 
       spinner.succeed(`Found ${matches.length} directories`);
 
