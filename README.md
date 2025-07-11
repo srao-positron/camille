@@ -4,6 +4,7 @@ An intelligent code compliance checker and embedding search tool for Claude Code
 <br />
 <img width="150" alt="image" src="https://github.com/user-attachments/assets/36dbf313-1ed7-446d-872f-51dba01af175" />
 <br />
+### Read the [announcement Substack here](https://www.srao.blog/p/code-so-fresh-its-still-dripping).
 
 
 ## Features
