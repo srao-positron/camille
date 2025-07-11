@@ -111,6 +111,18 @@ export class CamilleHook {
         return { continue: true };
       }
 
+      // Check if file should be reviewed based on extension
+      const filePath = toolInput?.file_path || toolInput?.path;
+      if (filePath && !this.shouldReviewFile(filePath)) {
+        logger.info('Skipping non-code file', { filePath, toolName });
+        console.error(`[DEBUG] Skipping file: ${filePath} (non-code file based on extension)`);
+        return { 
+          continue: true,
+          decision: 'approve' as const,
+          reason: 'Non-code file - review not required'
+        };
+      }
+
       // Create a tool object for backward compatibility
       const tool = {
         name: toolName,
@@ -165,6 +177,73 @@ export class CamilleHook {
   private isCodeEditingTool(toolName: string): boolean {
     const codeEditingTools = ['Edit', 'MultiEdit', 'Write', 'Update', 'Create'];
     return codeEditingTools.includes(toolName);
+  }
+
+  /**
+   * Checks if a file should be reviewed based on its extension
+   */
+  private shouldReviewFile(filePath: string): boolean {
+    if (!filePath) return true; // Review if no path provided
+    
+    const ext = path.extname(filePath).toLowerCase();
+    
+    // Skip non-code files
+    const skipExtensions = [
+      '.md',      // Markdown
+      '.txt',     // Text files
+      '.json',    // JSON (usually config)
+      '.yaml',    // YAML config
+      '.yml',     // YAML config
+      '.toml',    // TOML config
+      '.ini',     // INI config
+      '.log',     // Log files
+      '.lock',    // Lock files (package-lock.json, yarn.lock, etc.)
+      '.gitignore',
+      '.env',
+      '.env.example',
+      '.editorconfig',
+      '.prettierrc',
+      '.eslintrc',
+      '.LICENSE',
+      '.rst',     // ReStructuredText
+      '.png',     // Images
+      '.jpg',
+      '.jpeg',
+      '.gif',
+      '.svg',
+      '.ico',
+      '.pdf',     // Documents
+      '.doc',
+      '.docx'
+    ];
+    
+    // Skip if extension is in skip list
+    if (skipExtensions.includes(ext)) {
+      return false;
+    }
+    
+    // Skip files without extensions that are likely config files
+    if (!ext) {
+      const basename = path.basename(filePath).toLowerCase();
+      const skipFiles = [
+        'license',
+        'readme',
+        'changelog',
+        'contributing',
+        'code_of_conduct',
+        'dockerfile',
+        'makefile',
+        'rakefile',
+        'gemfile',
+        'procfile'
+      ];
+      
+      if (skipFiles.includes(basename)) {
+        return false;
+      }
+    }
+    
+    return true;
   }
 
   /**

@@ -15,15 +15,15 @@ An intelligent code compliance checker and embedding search tool for Claude Code
 - **🤖 MCP Server**: Provides tools to Claude for searching code and validating changes
 - **📁 Smart File Watching**: Automatically indexes new and changed files in real-time
 - **⚡ Performance Optimized**: Supports multiple LLM providers (Anthropic Claude recommended, OpenAI GPT alternative)
-- **🎯 Smart Model Selection**: Uses Claude Opus 4 or GPT-4o for detailed reviews, Haiku or GPT-4o-mini for quick checks
+- **🎯 Smart Model Selection**: Uses Claude Opus 4 or GPT-4o for detailed reviews, Claude 3.7 Sonnet or GPT-4o-mini for quick checks
 - **📄 Context-Aware Reviews**: Automatically includes CLAUDE.md, README, and linked files in code reviews
 
 ## Installation
 
-### From npm (when published)
+### From npm
 ```bash
 # Install globally (requires sudo on most systems)
-sudo npm install -g camille
+sudo npm install -g claude-camille
 
 # IMPORTANT: After installation, run setup WITHOUT sudo
 camille setup
@@ -80,7 +80,7 @@ camille config set-provider anthropic
 
 # Set models for different use cases
 camille config set-model review claude-opus-4-20250514
-camille config set-model quick claude-3-5-haiku-20241022
+camille config set-model quick claude-3-7-sonnet-20250219
 
 # List available models for a provider
 camille config list-models anthropic
@@ -343,7 +343,7 @@ To customize prompts, create files in the prompts directory with your custom con
 | `anthropicApiKey` | - | Your Anthropic API key (required when using Anthropic) |
 | `openaiApiKey` | - | Your OpenAI API key (always required for embeddings) |
 | `models.review` | `claude-opus-4-20250514` | Model for detailed code review |
-| `models.quick` | `claude-3-5-haiku-20241022` | Model for quick checks |
+| `models.quick` | `claude-3-7-sonnet-20250219` | Model for quick checks |
 | `models.embedding` | `text-embedding-3-large` | Model for generating embeddings (OpenAI only) |
 | `temperature` | `0.1` | Low temperature for consistent results |
 | `maxTokens` | `4000` | Maximum tokens for responses |
