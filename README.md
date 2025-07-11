@@ -1,4 +1,4 @@
-# Camille
+# Camille - An Automated Agent That Partners With Claude Code
 
 An intelligent code compliance checker and embedding search tool for Claude Code that uses Anthropic Claude or OpenAI to validate code changes against project rules, security best practices, and architectural decisions.
 
@@ -433,4 +433,6 @@ Apache 2 - See LICENSE file for details
 
 ## Acknowledgments
 
-Built for Claude Code by the community. Special thanks to Anthropic for creating Claude Code and the MCP protocol.
+Built by Sid Rao (@srao-positron) for Claude Code by the community. Special thanks to Anthropic for creating Claude Code and the MCP protocol.
+
+You can reach the original author at https://www.linkedin.com/in/sraocti or at his blog at https://srao.blog/. I would love to have co-contributors and collaborators for this project as I have extensive plans for this tool! This is just the very beginning.
