@@ -1,5 +1,5 @@
 {
-  "name": "camille",
+  "name": "claude-camille",
   "version": "0.1.0",
   "description": "An intelligent code compliance checker and embedding search tool for Claude Code",
   "main": "dist/index.js",
@@ -27,7 +27,7 @@
     "embeddings"
   ],
   "author": "",
-  "license": "MIT",
+  "license": "Apache 2.0",
   "dependencies": {
     "@anthropic-ai/sdk": "^0.56.0",
     "@modelcontextprotocol/sdk": "^1.0.0",
