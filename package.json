@@ -65,6 +65,7 @@
   "files": [
     "dist/**/*",
     "scripts/**/*",
-    "bin/**/*"
+    "bin/**/*",
+    "mcp-pipe-proxy.py"
   ]
 }

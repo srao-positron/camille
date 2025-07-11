@@ -504,10 +504,16 @@ export class CamilleServer {
       } else if (responseFormat === 'text') {
         return this.formatSearchResultsAsText(query, jsonResult);
       } else {
-        // 'both' format
+        // 'both' format - MCP expects 'content' field for display
         return {
-          json: jsonResult,
-          text: this.formatSearchResultsAsText(query, jsonResult)
+          content: [
+            {
+              type: 'text',
+              text: this.formatSearchResultsAsText(query, jsonResult)
+            }
+          ],
+          // Also include structured data for programmatic access
+          data: jsonResult
         };
       }
     } catch (error) {
@@ -575,10 +581,16 @@ export class CamilleServer {
       } else if (responseFormat === 'text') {
         return this.formatValidationResultAsText(filePath, changeType, jsonResult);
       } else {
-        // 'both' format
+        // 'both' format - MCP expects 'content' field for display
         return {
-          json: jsonResult,
-          text: this.formatValidationResultAsText(filePath, changeType, jsonResult)
+          content: [
+            {
+              type: 'text',
+              text: this.formatValidationResultAsText(filePath, changeType, jsonResult)
+            }
+          ],
+          // Also include structured data for programmatic access
+          data: jsonResult
         };
       }
     } catch (error) {
@@ -650,10 +662,16 @@ export class CamilleServer {
     } else if (responseFormat === 'text') {
       return this.formatStatusAsText(jsonResult);
     } else {
-      // 'both' format
+      // 'both' format - MCP expects 'content' field for display
       return {
-        json: jsonResult,
-        text: this.formatStatusAsText(jsonResult)
+        content: [
+          {
+            type: 'text',
+            text: this.formatStatusAsText(jsonResult)
+          }
+        ],
+        // Also include structured data for programmatic access
+        data: jsonResult
       };
     }
   }

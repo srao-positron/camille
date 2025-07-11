@@ -779,7 +779,9 @@ export class SetupWizard {
       choices: [
         { name: 'Edit - Single file edits', value: 'Edit', checked: true },
         { name: 'MultiEdit - Multiple edits', value: 'MultiEdit', checked: true },
-        { name: 'Write - New file creation', value: 'Write', checked: true }
+        { name: 'Write - New file creation', value: 'Write', checked: true },
+        { name: 'Update - File updates', value: 'Update', checked: true },
+        { name: 'Create - File creation', value: 'Create', checked: true }
       ]
     }]);
 
@@ -1070,7 +1072,21 @@ export class SetupWizard {
       }
       
       // Add server name and command to use the Python proxy
-      const proxyPath = path.join(__dirname, '..', 'mcp-pipe-proxy.py');
+      // In production, the proxy will be in the same directory as package.json
+      // In development, it's at the root of the project
+      let proxyPath = path.join(__dirname, '..', 'mcp-pipe-proxy.py');
+      
+      // Check if we're in a global npm installation
+      const packageJsonPath = path.join(__dirname, '..', 'package.json');
+      if (fs.existsSync(packageJsonPath)) {
+        // When installed globally, mcp-pipe-proxy.py will be in the same directory as package.json
+        const globalProxyPath = path.join(path.dirname(packageJsonPath), 'mcp-pipe-proxy.py');
+        if (fs.existsSync(globalProxyPath) || !fs.existsSync(proxyPath)) {
+          // Use the global path if it exists or if the dev path doesn't exist
+          proxyPath = globalProxyPath;
+        }
+      }
+      
       args.push('camille', '--', 'python3', proxyPath);
       
       if (mcpConfig.scope === 'local' && mcpConfig.projectDirs) {

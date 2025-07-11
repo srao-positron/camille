@@ -283,7 +283,7 @@ export function getRecommendedModels(provider: 'anthropic' | 'openai'): Recommen
   if (provider === 'anthropic') {
     return {
       review: ANTHROPIC_MODELS.find(m => m.id === 'claude-opus-4-20250514')!,
-      quick: ANTHROPIC_MODELS.find(m => m.id === 'claude-3-5-haiku-20241022')!
+      quick: ANTHROPIC_MODELS.find(m => m.id === 'claude-3-7-sonnet-20250219')!
     };
   } else {
     return {
