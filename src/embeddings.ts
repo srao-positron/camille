@@ -43,7 +43,9 @@ export class EmbeddingsIndex {
   constructor(private configManager: ConfigManager) {
     const config = configManager.getConfig();
     this.cacheToDisk = config.cacheToDisk;
-    this.cacheDir = path.join(configManager['configDir'], 'embeddings-cache');
+    // Use the standard .camille directory for cache
+    const homeDir = process.env.CAMILLE_CONFIG_DIR || path.join(require('os').homedir(), '.camille');
+    this.cacheDir = path.join(homeDir, 'cache');
     
     if (this.cacheToDisk) {
       this.ensureCacheDir();
@@ -68,12 +70,17 @@ export class EmbeddingsIndex {
     if (fs.existsSync(cacheFile)) {
       try {
         const data = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+        let loadedCount = 0;
         for (const [path, embedding] of Object.entries(data)) {
           this.index.set(path, embedding as EmbeddedFile);
+          loadedCount++;
         }
+        console.log(`Loaded ${loadedCount} embeddings from cache`);
       } catch (error) {
         console.error('Failed to load embeddings cache:', error);
       }
+    } else {
+      console.log(`No cache file found at ${cacheFile}`);
     }
   }
 
@@ -130,14 +137,21 @@ export class EmbeddingsIndex {
    */
   public needsReindex(filePath: string): boolean {
     const existing = this.index.get(filePath);
-    if (!existing) return true;
+    if (!existing) {
+      console.log(`File not in cache: ${filePath}`);
+      return true;
+    }
     
     try {
       const stats = fs.statSync(filePath);
       const content = fs.readFileSync(filePath, 'utf8');
       const hash = this.computeFileHash(content);
       
-      return existing.hash !== hash || existing.lastModified !== stats.mtimeMs;
+      const needsUpdate = existing.hash !== hash || existing.lastModified !== stats.mtimeMs;
+      if (!needsUpdate) {
+        console.log(`Using cache for: ${filePath}`);
+      }
+      return needsUpdate;
     } catch {
       return true;
     }

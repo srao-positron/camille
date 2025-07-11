@@ -6,7 +6,7 @@
 /**
  * MCP Protocol Version
  */
-export const MCP_PROTOCOL_VERSION = '1.0.0';
+export const MCP_PROTOCOL_VERSION = '2025-06-18';
 
 /**
  * MCP message types
@@ -161,6 +161,10 @@ export class MCPProtocolServer {
    * Handles incoming MCP messages
    */
   public async handleMessage(message: MCPMessage): Promise<MCPMessage> {
+    const fs = require('fs');
+    fs.appendFileSync('/tmp/camille-mcp-server.log', 
+      `[${new Date().toISOString()}] MCPProtocol.handleMessage: method=${message.method}, id=${message.id}, hasId=${message.id !== undefined && message.id !== null}\n`);
+    
     // Validate message structure
     if (!message.jsonrpc || message.jsonrpc !== '2.0') {
       return this.createErrorResponse(
@@ -171,7 +175,9 @@ export class MCPProtocolServer {
     }
 
     // Handle notifications (no response)
-    if (!message.id && message.method) {
+    if (message.id === undefined && message.method) {
+      fs.appendFileSync('/tmp/camille-mcp-server.log', 
+        `[${new Date().toISOString()}] Detected as notification (no id)\n`);
       const handler = this.handlers.get(message.method);
       if (handler) {
         try {
@@ -194,6 +200,9 @@ export class MCPProtocolServer {
     }
 
     // Find and execute handler
+    fs.appendFileSync('/tmp/camille-mcp-server.log', 
+      `[${new Date().toISOString()}] Looking for handler: ${message.method}, available: ${Array.from(this.handlers.keys()).join(', ')}\n`);
+    
     const handler = this.handlers.get(message.method);
     if (!handler) {
       return this.createErrorResponse(

@@ -175,7 +175,7 @@ describe('EmbeddingsIndex', () => {
       // Verify writeFileSync was called with cache file
       expect(fs.writeFileSync).toHaveBeenCalled();
       const calls = (fs.writeFileSync as jest.Mock).mock.calls;
-      const cacheCall = calls.find(call => call[0].includes('embeddings-cache'));
+      const cacheCall = calls.find(call => call[0].includes('index.json'));
       expect(cacheCall).toBeDefined();
     });
   });

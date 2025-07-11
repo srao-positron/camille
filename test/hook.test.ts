@@ -4,21 +4,22 @@
 
 import { CamilleHook } from '../src/hook';
 import { ConfigManager } from '../src/config';
-import { OpenAIClient } from '../src/openai-client';
+import { LLMClient } from '../src/llm-client';
 import * as fs from 'fs';
 import * as path from 'path';
 
-// Mock the OpenAI client
-jest.mock('../src/openai-client');
+// Mock the LLM client
+jest.mock('../src/llm-client');
 
 describe('CamilleHook', () => {
   let hook: CamilleHook;
-  let mockOpenAIClient: jest.Mocked<OpenAIClient>;
+  let mockLLMClient: jest.Mocked<LLMClient>;
   
   beforeEach(() => {
     // Mock config manager to provide test API key
     jest.spyOn(ConfigManager.prototype, 'getApiKey').mockReturnValue('test-api-key');
     jest.spyOn(ConfigManager.prototype, 'getConfig').mockReturnValue({
+      provider: 'openai',
       openaiApiKey: 'test-api-key',
       models: {
         review: 'gpt-4-turbo-preview',
@@ -29,14 +30,15 @@ describe('CamilleHook', () => {
       maxTokens: 4000,
       cacheToDisk: false,
       ignorePatterns: []
-    });
+    } as any);
 
-    // Mock OpenAI client
-    mockOpenAIClient = {
-      reviewCode: jest.fn()
+    // Mock LLM client
+    mockLLMClient = {
+      reviewCode: jest.fn(),
+      comprehensiveReview: jest.fn()
     } as any;
     
-    (OpenAIClient as jest.MockedClass<typeof OpenAIClient>).mockImplementation(() => mockOpenAIClient);
+    (LLMClient as jest.MockedClass<typeof LLMClient>).mockImplementation(() => mockLLMClient);
     
     hook = new CamilleHook();
   });
@@ -61,7 +63,7 @@ describe('CamilleHook', () => {
         }
       };
 
-      mockOpenAIClient.reviewCode.mockResolvedValue({
+      mockLLMClient.reviewCode.mockResolvedValue({
         securityIssues: [],
         complianceViolations: [],
         codeQualityIssues: [],
@@ -74,7 +76,7 @@ describe('CamilleHook', () => {
 
       expect(result.continue).toBe(true);
       expect(result.decision).toBe('approve');
-      expect(result.reason).toContain('No security or compliance issues found');
+      expect(result.reason).toContain('Code review passed');
     });
 
     it('should block code with security issues', async () => {
@@ -91,7 +93,7 @@ describe('CamilleHook', () => {
         }
       };
 
-      mockOpenAIClient.reviewCode.mockResolvedValue({
+      mockLLMClient.reviewCode.mockResolvedValue({
         securityIssues: ['Potential code injection via eval()'],
         complianceViolations: [],
         codeQualityIssues: [],
@@ -124,7 +126,7 @@ describe('CamilleHook', () => {
         }
       };
 
-      mockOpenAIClient.reviewCode.mockResolvedValue({
+      mockLLMClient.reviewCode.mockResolvedValue({
         securityIssues: [],
         complianceViolations: ['Removing async violates project async/await requirements'],
         codeQualityIssues: ['Potential race condition'],
@@ -154,7 +156,7 @@ describe('CamilleHook', () => {
       const result = await hook.processHook(input);
 
       expect(result.continue).toBe(true);
-      expect(mockOpenAIClient.reviewCode).not.toHaveBeenCalled();
+      expect(mockLLMClient.reviewCode).not.toHaveBeenCalled();
     });
 
     it('should pass through non-PreToolUse events', async () => {
@@ -171,7 +173,7 @@ describe('CamilleHook', () => {
       const result = await hook.processHook(input);
 
       expect(result.continue).toBe(true);
-      expect(mockOpenAIClient.reviewCode).not.toHaveBeenCalled();
+      expect(mockLLMClient.reviewCode).not.toHaveBeenCalled();
     });
 
     it('should handle OpenAI API errors', async () => {
@@ -189,7 +191,7 @@ describe('CamilleHook', () => {
         }
       };
 
-      mockOpenAIClient.reviewCode.mockRejectedValue(new Error('API rate limit exceeded'));
+      mockLLMClient.reviewCode.mockRejectedValue(new Error('API rate limit exceeded'));
 
       const result = await hook.processHook(input);
 
@@ -215,7 +217,7 @@ describe('CamilleHook', () => {
         }
       };
 
-      mockOpenAIClient.reviewCode.mockImplementation(async (system, user, detailed) => {
+      mockLLMClient.reviewCode.mockImplementation(async (system: any, user: any, detailed: any) => {
         expect(user).toContain('File: /test/file.js');
         expect(user).toContain('Action: Edit');
         expect(user).toContain('Old: const a = 1');
@@ -232,7 +234,7 @@ describe('CamilleHook', () => {
       });
 
       await hook.processHook(input);
-      expect(mockOpenAIClient.reviewCode).toHaveBeenCalled();
+      expect(mockLLMClient.reviewCode).toHaveBeenCalled();
     });
 
     it('should format MultiEdit changes correctly', async () => {
@@ -252,7 +254,7 @@ describe('CamilleHook', () => {
         }
       };
 
-      mockOpenAIClient.reviewCode.mockImplementation(async (system, user, detailed) => {
+      mockLLMClient.reviewCode.mockImplementation(async (system: any, user: any, detailed: any) => {
         expect(user).toContain('File: /test/file.js');
         expect(user).toContain('Action: MultiEdit');
         expect(user).toContain('Edit 1:');
@@ -271,7 +273,7 @@ describe('CamilleHook', () => {
       });
 
       await hook.processHook(input);
-      expect(mockOpenAIClient.reviewCode).toHaveBeenCalled();
+      expect(mockLLMClient.reviewCode).toHaveBeenCalled();
     });
   });
 });

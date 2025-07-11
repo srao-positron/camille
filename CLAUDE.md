@@ -8,6 +8,28 @@ Camille is a security-focused code review and search tool that integrates with C
 
 **IMPORTANT**: This project is specifically for Claude Code integration, NOT Claude Desktop. All documentation, code comments, and references should mention "Claude Code" exclusively. Never reference "Claude Desktop" in any context.
 
+## Comprehensive Code Review
+
+Camille supports two review modes:
+
+1. **Standard Review** (expansiveReview: false): Quick security and compliance checks without codebase access
+2. **Comprehensive Review** (expansiveReview: true, default): Full analysis with codebase search and context
+
+The comprehensive review evaluates code across 8 dimensions with 0-10 scoring:
+- Security: Vulnerability detection and prevention
+- Accuracy: Compilation and runtime correctness
+- Algorithmic Efficiency: Time/space complexity optimization
+- Code Reuse: DRY principle and existing utility usage
+- Operational Excellence: Logging, error handling, monitoring
+- Style Compliance: Consistency with codebase patterns
+- Object-Oriented Design: SOLID principles and patterns
+- Architecture Patterns: Async considerations and design patterns
+
+When expansiveReview is enabled, OpenAI has access to:
+- Search tool to find semantically similar code in the codebase
+- File reading tool to examine full context
+- This enables detection of duplicate code, style inconsistencies, and architectural violations
+
 ## Core Principles
 
 1. **Security First**: All code changes must prioritize security. Never introduce code that could expose secrets, create vulnerabilities, or bypass security checks.

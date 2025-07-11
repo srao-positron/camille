@@ -34,24 +34,28 @@ describe('ConfigManager', () => {
   });
 
   describe('initialization', () => {
-    it('should create config directory if it does not exist', () => {
-      expect(fs.existsSync(testConfigDir)).toBe(true);
+    it('should not create config directory until saving', () => {
+      expect(fs.existsSync(testConfigDir)).toBe(false);
     });
 
-    it('should load API key from environment variable', () => {
+    it('should load OpenAI API key from environment variable', () => {
+      // Since default provider is anthropic, switch to OpenAI to test
+      configManager.setProvider('openai');
       expect(configManager.getApiKey()).toBe('test-key-from-env');
     });
 
     it('should use default configuration values', () => {
       const config = configManager.getConfig();
-      expect(config.models.review).toBe('gpt-4.1');
-      expect(config.models.quick).toBe('gpt-4.1-mini');
+      expect(config.provider).toBe('anthropic');
+      expect(config.models.review).toBe('claude-opus-4-20250514');
+      expect(config.models.quick).toBe('claude-3-5-haiku-20241022');
       expect(config.models.embedding).toBe('text-embedding-3-large');
       expect(config.temperature).toBe(0.1);
       expect(config.maxTokens).toBe(4000);
       expect(config.maxFileSize).toBe(200000);
       expect(config.maxIndexFileSize).toBe(500000);
-      expect(config.cacheToDisk).toBe(false);
+      expect(config.cacheToDisk).toBe(true);
+      expect(config.expansiveReview).toBe(true);
     });
   });
 

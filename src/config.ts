@@ -12,17 +12,24 @@ import { config as dotenvConfig } from 'dotenv';
  * Interface for Camille configuration options
  */
 export interface CamilleConfig {
+  // Legacy OpenAI API key (for backward compatibility)
   openaiApiKey?: string;
+  
+  // New provider configuration
+  provider?: 'anthropic' | 'openai';
+  anthropicApiKey?: string;
+  
   models: {
-    review: string;      // Model for detailed code review (default: gpt-4.1)
-    quick: string;       // Model for quick checks (default: gpt-4.1-mini)
-    embedding: string;   // Model for embeddings (default: text-embedding-3-large)
+    review: string;      // Model for detailed code review
+    quick: string;       // Model for quick checks
+    embedding?: string;  // Model for embeddings (OpenAI only)
   };
   temperature: number;   // Low temperature for consistent results (default: 0.1)
   maxTokens: number;     // Maximum tokens for responses
   maxFileSize?: number;  // Maximum file size in bytes for tool calls (default: 200000)
   maxIndexFileSize?: number; // Maximum file size in bytes for indexing (default: 500000)
   cacheToDisk: boolean;  // Whether to persist embeddings to disk
+  expansiveReview: boolean; // Whether to provide LLM with codebase access for comprehensive reviews (default: true)
   ignorePatterns: string[]; // File patterns to ignore (gitignore format)
   customPrompts?: {
     system?: string;     // Custom system prompt
@@ -48,16 +55,18 @@ export interface CamilleConfig {
  * Default configuration values
  */
 const DEFAULT_CONFIG: CamilleConfig = {
+  provider: 'anthropic',  // Default to Anthropic
   models: {
-    review: 'gpt-4.1',
-    quick: 'gpt-4.1-mini',
-    embedding: 'text-embedding-3-large'
+    review: 'claude-opus-4-20250514',     // Claude Opus 4 for detailed reviews
+    quick: 'claude-3-5-haiku-20241022',   // Claude 3.5 Haiku for quick checks
+    embedding: 'text-embedding-3-large'    // Still use OpenAI for embeddings
   },
   temperature: 0.1,
   maxTokens: 4000,
   maxFileSize: 200000,    // 200KB for tool calls
   maxIndexFileSize: 500000, // 500KB for indexing
-  cacheToDisk: false,
+  cacheToDisk: true,
+  expansiveReview: true,  // Enable comprehensive code reviews by default
   ignorePatterns: [
     'node_modules/**',
     '.git/**',
@@ -96,26 +105,31 @@ export class ConfigManager {
    * Loads configuration from file or creates default
    */
   private loadConfig(): CamilleConfig {
-    this.ensureConfigDir();
-
+    // Don't create directory when just loading config
     // Load from environment first
     dotenvConfig();
     
     let config: CamilleConfig = { ...DEFAULT_CONFIG };
 
-    // Load from config file if exists
+    // Load from config file if exists (but don't create directory)
     if (fs.existsSync(this.configPath)) {
       try {
         const fileConfig = JSON.parse(fs.readFileSync(this.configPath, 'utf8'));
         config = { ...config, ...fileConfig };
       } catch (error) {
-        console.error('Error loading config file:', error);
+        // Don't log error if it's just a missing file
+        if (fs.existsSync(this.configDir)) {
+          console.error('Error loading config file:', error);
+        }
       }
     }
 
     // Override with environment variables
     if (process.env.OPENAI_API_KEY) {
       config.openaiApiKey = process.env.OPENAI_API_KEY;
+    }
+    if (process.env.ANTHROPIC_API_KEY) {
+      config.anthropicApiKey = process.env.ANTHROPIC_API_KEY;
     }
 
     return config;
@@ -125,26 +139,86 @@ export class ConfigManager {
    * Saves the current configuration to file
    */
   public saveConfig(): void {
-    this.ensureConfigDir();
-    fs.writeFileSync(this.configPath, JSON.stringify(this.config, null, 2));
+    try {
+      this.ensureConfigDir();
+      fs.writeFileSync(this.configPath, JSON.stringify(this.config, null, 2));
+    } catch (error: any) {
+      if (error.code === 'EACCES') {
+        console.error('\n❌ Permission denied writing to config file');
+        console.error('\nThis usually happens when you previously ran setup with sudo.');
+        console.error('\nTo fix this:');
+        console.error('1. Run: ./fix-permissions.sh');
+        console.error('2. Then run: camille setup (WITHOUT sudo)\n');
+        throw new Error('Permission denied. See instructions above.');
+      }
+      throw error;
+    }
   }
 
   /**
-   * Gets the OpenAI API key
+   * Gets the API key for the current provider
    * @throws Error if API key is not set
    */
   public getApiKey(): string {
+    const provider = this.config.provider || 'openai'; // Default to openai for backward compatibility
+    
+    if (provider === 'anthropic') {
+      if (!this.config.anthropicApiKey) {
+        throw new Error('Anthropic API key not configured. Run "camille config set-key <key>" or set ANTHROPIC_API_KEY environment variable.');
+      }
+      return this.config.anthropicApiKey;
+    } else {
+      if (!this.config.openaiApiKey) {
+        throw new Error('OpenAI API key not configured. Run "camille config set-key <key>" or set OPENAI_API_KEY environment variable.');
+      }
+      return this.config.openaiApiKey;
+    }
+  }
+
+  /**
+   * Gets the OpenAI API key (for embeddings)
+   * @throws Error if API key is not set
+   */
+  public getOpenAIApiKey(): string {
     if (!this.config.openaiApiKey) {
-      throw new Error('OpenAI API key not configured. Run "camille --set-key <key>" or set OPENAI_API_KEY environment variable.');
+      throw new Error('OpenAI API key not configured. Required for embeddings. Run "camille config set-key openai <key>" or set OPENAI_API_KEY environment variable.');
     }
     return this.config.openaiApiKey;
   }
 
   /**
-   * Sets the OpenAI API key
+   * Sets the API key for a provider
    */
-  public setApiKey(key: string): void {
-    this.config.openaiApiKey = key;
+  public setApiKey(key: string, provider?: 'anthropic' | 'openai'): void {
+    // If no provider specified, use current provider or openai for backward compatibility
+    const targetProvider = provider || this.config.provider || 'openai';
+    
+    if (targetProvider === 'anthropic') {
+      this.config.anthropicApiKey = key;
+    } else {
+      this.config.openaiApiKey = key;
+    }
+    
+    // Also set the provider if explicitly specified
+    if (provider) {
+      this.config.provider = provider;
+    }
+    
+    this.saveConfig();
+  }
+
+  /**
+   * Gets the current provider
+   */
+  public getProvider(): 'anthropic' | 'openai' {
+    return this.config.provider || 'openai';
+  }
+
+  /**
+   * Sets the provider
+   */
+  public setProvider(provider: 'anthropic' | 'openai'): void {
+    this.config.provider = provider;
     this.saveConfig();
   }
 

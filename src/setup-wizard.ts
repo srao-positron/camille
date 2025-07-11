@@ -18,6 +18,13 @@ import { ConfigManager } from './config';
 import { OpenAIClient } from './openai-client';
 import { Logger } from './logger';
 import { spawn } from 'child_process';
+import { 
+  getModelsForProvider, 
+  getRecommendedModels,
+  ModelInfo,
+  LLMProvider 
+} from './providers';
+import { createProvider } from './providers';
 
 // Register autocomplete prompt
 inquirer.registerPrompt('autocomplete', inquirerAutocompletePrompt);
@@ -39,6 +46,30 @@ export class SetupWizard {
    */
   async run(): Promise<void> {
     try {
+      // Check if running as root
+      if (process.getuid && process.getuid() === 0) {
+        console.error(chalk.red('\n❌ Do not run the setup wizard with sudo!'));
+        console.error(chalk.yellow('\nRunning as root will:'));
+        console.error(chalk.gray('  • Create config files owned by root'));
+        console.error(chalk.gray('  • Update root\'s Claude settings instead of yours'));
+        console.error(chalk.gray('  • Cause permission errors later\n'));
+        
+        // Check if there's a permission issue
+        const configPath = path.join(os.homedir(), '.camille', 'config.json');
+        if (fs.existsSync(configPath)) {
+          try {
+            fs.accessSync(configPath, fs.constants.W_OK);
+          } catch {
+            console.error(chalk.yellow('It looks like you have permission issues from a previous sudo install.'));
+            console.error(chalk.cyan('\nTo fix this, run:'));
+            console.error(chalk.gray('  cd ' + path.join(__dirname, '..')));
+            console.error(chalk.gray('  ./fix-permissions.sh\n'));
+          }
+        }
+        
+        process.exit(1);
+      }
+
       // Show welcome screen
       this.showWelcome();
 
@@ -50,8 +81,8 @@ export class SetupWizard {
       // Start setup process
       this.logger.info('Starting Camille setup wizard');
       
-      // Step 1: Configure OpenAI API key
-      const apiKey = await this.setupApiKey();
+      // Step 1: Configure LLM provider and models
+      const providerConfig = await this.setupProviderAndModels();
       
       // Step 2: Select directories to monitor
       const directories = await this.selectDirectories();
@@ -67,7 +98,12 @@ export class SetupWizard {
       
       // Step 6: Review and confirm
       await this.reviewConfiguration({
-        apiKey: '***' + apiKey.slice(-4),
+        provider: providerConfig.provider,
+        models: providerConfig.models,
+        apiKeys: {
+          anthropic: providerConfig.apiKeys.anthropic ? '***' + providerConfig.apiKeys.anthropic.slice(-4) : undefined,
+          openai: providerConfig.apiKeys.openai ? '***' + providerConfig.apiKeys.openai.slice(-4) : undefined
+        },
         directories,
         mcpConfig,
         hooksConfig,
@@ -75,7 +111,7 @@ export class SetupWizard {
       });
 
       // Apply configuration
-      await this.applyConfiguration(apiKey, directories, mcpConfig, hooksConfig, serviceConfig);
+      await this.applyConfiguration(providerConfig, directories, mcpConfig, hooksConfig, serviceConfig);
 
       // Test the setup
       await this.testSetup();
@@ -148,11 +184,134 @@ export class SetupWizard {
   }
 
   /**
-   * Sets up OpenAI API key with validation
+   * Sets up LLM provider configuration
    */
-  private async setupApiKey(): Promise<string> {
-    console.log(chalk.blue('\n🔑 OpenAI API Configuration\n'));
+  private async setupProviderAndModels(): Promise<{
+    provider: LLMProvider;
+    models: { review: string; quick: string; embedding?: string };
+    apiKeys: { anthropic?: string; openai?: string };
+  }> {
+    console.log(chalk.blue('\n🤖 LLM Provider Configuration\n'));
 
+    // Step 1: Select provider
+    const { provider } = await inquirer.prompt([{
+      type: 'list',
+      name: 'provider',
+      message: 'Select your LLM provider:',
+      choices: [
+        { 
+          name: 'Anthropic Claude (Recommended) - Best tool support', 
+          value: 'anthropic' 
+        },
+        { 
+          name: 'OpenAI GPT - Alternative option', 
+          value: 'openai' 
+        }
+      ],
+      default: 'anthropic'
+    }]);
+
+    this.logger.info(`Selected provider: ${provider}`);
+
+    // Step 2: Select models
+    const models = await this.selectModels(provider);
+
+    // Step 3: Get API keys
+    const apiKeys: { anthropic?: string; openai?: string } = {};
+    
+    // Always need OpenAI key for embeddings
+    console.log(chalk.blue('\n🔑 API Key Configuration\n'));
+    
+    if (provider === 'anthropic') {
+      console.log(chalk.yellow('Note: You\'ll need both Anthropic and OpenAI API keys.'));
+      console.log(chalk.gray('Anthropic is used for code reviews, OpenAI is used for embeddings.\n'));
+      
+      apiKeys.anthropic = await this.getApiKey('anthropic');
+      apiKeys.openai = await this.getApiKey('openai');
+    } else {
+      apiKeys.openai = await this.getApiKey('openai');
+    }
+
+    return { provider, models, apiKeys };
+  }
+
+  /**
+   * Selects models for a provider
+   */
+  private async selectModels(provider: LLMProvider): Promise<{
+    review: string;
+    quick: string;
+    embedding?: string;
+  }> {
+    console.log(chalk.blue('\n📊 Model Selection\n'));
+    
+    const availableModels = getModelsForProvider(provider);
+    const recommendedModels = getRecommendedModels(provider);
+    
+    // Filter models for each use case
+    const reviewModels = availableModels.filter(m => m.supportsTools);
+    const quickModels = availableModels.filter(m => m.supportsTools && m.pricing.input <= 5);
+    const embeddingModels = availableModels.filter(m => m.id.includes('embedding'));
+
+    console.log(chalk.gray('Select models for different use cases:\n'));
+
+    // Select review model
+    const { reviewModel } = await inquirer.prompt([{
+      type: 'list',
+      name: 'reviewModel',
+      message: 'Select model for detailed code reviews:',
+      choices: reviewModels.map(model => ({
+        name: `${model.name} - $${model.pricing.input}/${model.pricing.output} per 1M tokens ${model.id === recommendedModels.review.id ? chalk.green('(Recommended)') : ''}`,
+        value: model.id,
+        short: model.name
+      })),
+      default: recommendedModels.review.id
+    }]);
+
+    // Select quick model
+    const { quickModel } = await inquirer.prompt([{
+      type: 'list',
+      name: 'quickModel',
+      message: 'Select model for quick checks:',
+      choices: quickModels.map(model => ({
+        name: `${model.name} - $${model.pricing.input}/${model.pricing.output} per 1M tokens ${model.id === recommendedModels.quick.id ? chalk.green('(Recommended)') : ''}`,
+        value: model.id,
+        short: model.name
+      })),
+      default: recommendedModels.quick.id
+    }]);
+
+    const models: any = {
+      review: reviewModel,
+      quick: quickModel
+    };
+
+    // For OpenAI, also select embedding model
+    if (provider === 'openai' && embeddingModels.length > 0) {
+      const { embeddingModel } = await inquirer.prompt([{
+        type: 'list',
+        name: 'embeddingModel',
+        message: 'Select model for embeddings:',
+        choices: embeddingModels.map(model => ({
+          name: `${model.name} - $${model.pricing.input} per 1M tokens ${model.id === recommendedModels.embedding?.id ? chalk.green('(Recommended)') : ''}`,
+          value: model.id,
+          short: model.name
+        })),
+        default: recommendedModels.embedding?.id
+      }]);
+      models.embedding = embeddingModel;
+    } else {
+      // Use OpenAI for embeddings even when using Anthropic for chat
+      models.embedding = 'text-embedding-3-large';
+    }
+
+    return models;
+  }
+
+  /**
+   * Gets and validates an API key for a provider
+   */
+  private async getApiKey(provider: 'anthropic' | 'openai'): Promise<string> {
     let apiKey: string;
     let isValid = false;
 
@@ -160,11 +319,16 @@ export class SetupWizard {
       const { key } = await inquirer.prompt([{
         type: 'password',
         name: 'key',
-        message: 'Enter your OpenAI API key:',
+        message: `Enter your ${provider === 'anthropic' ? 'Anthropic' : 'OpenAI'} API key:`,
         mask: '*',
         validate: (input: string) => {
           if (!input) return 'API key is required';
-          if (!input.startsWith('sk-')) return 'Invalid API key format';
+          if (provider === 'openai' && !input.startsWith('sk-')) {
+            return 'OpenAI API key should start with "sk-"';
+          }
+          if (provider === 'anthropic' && !input.startsWith('sk-ant-')) {
+            return 'Anthropic API key should start with "sk-ant-"';
+          }
           if (input.length < 40) return 'API key seems too short';
           return true;
         }
@@ -173,19 +337,18 @@ export class SetupWizard {
       apiKey = key;
 
       // Test the API key
-      const spinner = ora('Validating API key...').start();
-      this.logger.info('Validating OpenAI API key');
+      const spinner = ora(`Validating ${provider} API key...`).start();
+      this.logger.info(`Validating ${provider} API key`);
 
       try {
-        const testClient = new OpenAIClient(apiKey, {
-          models: { review: 'gpt-4-turbo-preview', quick: 'gpt-4o-mini', embedding: 'text-embedding-3-small' },
-          temperature: 0.1,
-          maxTokens: 100,
-          cacheToDisk: false,
-          ignorePatterns: []
-        }, process.cwd());
+        const testProvider = createProvider({
+          provider,
+          apiKey
+        });
 
-        await testClient.complete('Test connection');
+        if (testProvider.validateApiKey) {
+          await testProvider.validateApiKey();
+        }
         
         spinner.succeed('API key validated successfully');
         this.logger.info('API key validation successful');
@@ -650,9 +813,28 @@ export class SetupWizard {
   private async reviewConfiguration(config: any): Promise<void> {
     console.log(chalk.blue('\n📋 Configuration Review\n'));
 
+    let apiKeySection = '';
+    if (config.provider === 'anthropic') {
+      apiKeySection = 
+        chalk.gray('Provider: ') + chalk.green('Anthropic Claude') + '\n' +
+        chalk.gray('Anthropic API Key: ') + chalk.green(config.apiKeys.anthropic || 'Not set') + '\n' +
+        chalk.gray('OpenAI API Key: ') + chalk.green(config.apiKeys.openai || 'Not set') + chalk.gray(' (for embeddings)') + '\n';
+    } else {
+      apiKeySection = 
+        chalk.gray('Provider: ') + chalk.green('OpenAI GPT') + '\n' +
+        chalk.gray('OpenAI API Key: ') + chalk.green(config.apiKeys.openai || 'Not set') + '\n';
+    }
+
+    const modelsSection = 
+      chalk.gray('Models:\n') +
+      chalk.gray('  • Review: ') + chalk.green(config.models.review) + '\n' +
+      chalk.gray('  • Quick: ') + chalk.green(config.models.quick) + '\n' +
+      chalk.gray('  • Embedding: ') + chalk.green(config.models.embedding || 'text-embedding-3-large') + '\n';
+
     const summary = boxen(
       chalk.white('Your Camille Configuration:\n\n') +
-      chalk.gray('OpenAI API Key: ') + chalk.green(config.apiKey) + '\n' +
+      apiKeySection +
+      modelsSection + '\n' +
       chalk.gray('Directories: ') + chalk.green(config.directories.length) + ' selected\n' +
       config.directories.map((d: string) => chalk.gray('  • ') + d).join('\n') + '\n\n' +
       chalk.gray('MCP Server: ') + (config.mcpConfig.enabled ? chalk.green('Enabled') : chalk.red('Disabled')) + '\n' +
@@ -683,7 +865,11 @@ export class SetupWizard {
    * Applies the configuration
    */
   private async applyConfiguration(
-    apiKey: string,
+    providerConfig: {
+      provider: LLMProvider;
+      models: { review: string; quick: string; embedding?: string };
+      apiKeys: { anthropic?: string; openai?: string };
+    },
     directories: string[],
     mcpConfig: any,
     hooksConfig: any,
@@ -693,11 +879,20 @@ export class SetupWizard {
     this.logger.info('Applying configuration');
 
     try {
-      // Save API key
-      this.configManager.setApiKey(apiKey);
+      // Save provider and API keys
+      this.configManager.setProvider(providerConfig.provider);
+      
+      if (providerConfig.apiKeys.anthropic) {
+        this.configManager.setApiKey(providerConfig.apiKeys.anthropic, 'anthropic');
+      }
+      if (providerConfig.apiKeys.openai) {
+        this.configManager.setApiKey(providerConfig.apiKeys.openai, 'openai');
+      }
       
       // Save other settings
       this.configManager.updateConfig({
+        provider: providerConfig.provider,
+        models: providerConfig.models,
         watchedDirectories: directories,
         mcp: mcpConfig,
         hooks: hooksConfig,
@@ -845,12 +1040,6 @@ export class SetupWizard {
         args.push('--scope', mcpConfig.scope);
       }
       
-      // Add environment variable if API key is set
-      const config = this.configManager.getConfig();
-      if (config.openaiApiKey) {
-        args.push('-e', `OPENAI_API_KEY=${config.openaiApiKey}`);
-      }
-      
       // Add server name and command to use the Python proxy
       const proxyPath = path.join(__dirname, '..', 'mcp-pipe-proxy.py');
       args.push('camille', '--', 'python3', proxyPath);
@@ -912,7 +1101,6 @@ export class SetupWizard {
         <string>server</string>
         <string>start</string>
         ${directories.flatMap(d => ['<string>-d</string>', `<string>${d}</string>`]).join('\n        ')}
-        <string>--mcp</string>
     </array>
     <key>RunAtLoad</key>
     <true/>
@@ -944,7 +1132,7 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=${process.execPath} ${path.join(__dirname, '..', 'dist', 'cli.js')} server start ${directories.map(d => `-d ${d}`).join(' ')} --mcp
+ExecStart=${process.execPath} ${path.join(__dirname, '..', 'dist', 'cli.js')} server start ${directories.map(d => `-d ${d}`).join(' ')}
 Restart=always
 User=${os.userInfo().username}
 StandardOutput=append:/tmp/camille.log
@@ -1032,9 +1220,9 @@ WantedBy=default.target`;
     if (config.watchedDirectories && config.watchedDirectories.length > 0) {
       console.log(chalk.blue('\n🚀 Starting Camille server...\n'));
       try {
-        // Use nohup to start the server truly detached
+        // Use nohup to start the server truly detached (without --mcp flag)
         const { execSync } = require('child_process');
-        execSync('nohup camille server start --mcp > /dev/null 2>&1 &', {
+        execSync('nohup camille server start > /dev/null 2>&1 &', {
           shell: true
         });
         

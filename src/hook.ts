@@ -4,10 +4,19 @@
  */
 
 import { ConfigManager } from './config';
-import { OpenAIClient, ReviewResult } from './openai-client';
-import { SYSTEM_PROMPT, REVIEW_PROMPT_TEMPLATE, populateTemplate } from './prompts';
+import { ReviewResult } from './openai-client';
+import { LLMClient } from './llm-client';
+import { 
+  SYSTEM_PROMPT, 
+  COMPREHENSIVE_SYSTEM_PROMPT,
+  REVIEW_PROMPT_TEMPLATE, 
+  COMPREHENSIVE_REVIEW_TEMPLATE,
+  populateTemplate 
+} from './prompts';
 import { logger } from './logger';
 import * as path from 'path';
+import * as fs from 'fs';
+import { EmbeddingsIndex } from './embeddings';
 
 /**
  * Hook input structure from Claude Code
@@ -36,15 +45,20 @@ interface HookOutput {
  */
 export class CamilleHook {
   private configManager: ConfigManager;
-  private openaiClient: OpenAIClient;
+  private llmClient: LLMClient;
+  private embeddingsIndex?: EmbeddingsIndex;
 
   constructor() {
     this.configManager = new ConfigManager();
     const config = this.configManager.getConfig();
-    const apiKey = this.configManager.getApiKey();
     const workingDir = process.cwd();
     
-    this.openaiClient = new OpenAIClient(apiKey, config, workingDir);
+    // Create embeddings index if expansive review is enabled
+    if (config.expansiveReview) {
+      this.embeddingsIndex = new EmbeddingsIndex(this.configManager);
+    }
+    
+    this.llmClient = new LLMClient(config, workingDir, this.embeddingsIndex);
   }
 
   /**
@@ -167,35 +181,187 @@ ${input.content}`;
   }
 
   /**
+   * Reads project context files (CLAUDE.md, README) and extracts linked files
+   */
+  private async readProjectContext(): Promise<string> {
+    const context: string[] = [];
+    const workingDir = process.cwd();
+    
+    // Read CLAUDE.md if it exists
+    const claudeMdPath = path.join(workingDir, 'CLAUDE.md');
+    if (fs.existsSync(claudeMdPath)) {
+      try {
+        const content = fs.readFileSync(claudeMdPath, 'utf8');
+        context.push('=== CLAUDE.md (Project Rules) ===\n' + content);
+        
+        // Extract linked files from CLAUDE.md
+        const linkedFiles = this.extractLinkedFiles(content, workingDir);
+        for (const linkedFile of linkedFiles) {
+          if (fs.existsSync(linkedFile)) {
+            try {
+              const linkedContent = fs.readFileSync(linkedFile, 'utf8');
+              context.push(`\n=== ${path.relative(workingDir, linkedFile)} ===\n${linkedContent}`);
+            } catch (error) {
+              logger.warn('Failed to read linked file', { file: linkedFile, error });
+            }
+          }
+        }
+      } catch (error) {
+        logger.warn('Failed to read CLAUDE.md', { error });
+      }
+    }
+    
+    // Read README.md if it exists
+    const readmePath = path.join(workingDir, 'README.md');
+    if (fs.existsSync(readmePath)) {
+      try {
+        const content = fs.readFileSync(readmePath, 'utf8');
+        context.push('\n=== README.md ===\n' + content);
+        
+        // Extract linked files from README
+        const linkedFiles = this.extractLinkedFiles(content, workingDir);
+        for (const linkedFile of linkedFiles) {
+          if (fs.existsSync(linkedFile) && !context.some(c => c.includes(linkedFile))) {
+            try {
+              const linkedContent = fs.readFileSync(linkedFile, 'utf8');
+              context.push(`\n=== ${path.relative(workingDir, linkedFile)} ===\n${linkedContent}`);
+            } catch (error) {
+              logger.warn('Failed to read linked file', { file: linkedFile, error });
+            }
+          }
+        }
+      } catch (error) {
+        logger.warn('Failed to read README.md', { error });
+      }
+    }
+    
+    return context.join('\n\n');
+  }
+
+  /**
+   * Extracts linked file paths from markdown content
+   */
+  private extractLinkedFiles(content: string, workingDir: string): string[] {
+    const linkedFiles: string[] = [];
+    
+    // Match markdown links: [text](path)
+    const linkRegex = /\[([^\]]+)\]\(([^)]+)\)/g;
+    let match;
+    
+    while ((match = linkRegex.exec(content)) !== null) {
+      const linkPath = match[2];
+      
+      // Skip URLs and anchors
+      if (linkPath.startsWith('http') || linkPath.startsWith('#')) {
+        continue;
+      }
+      
+      // Skip image files
+      if (/\.(png|jpg|jpeg|gif|svg|ico)$/i.test(linkPath)) {
+        continue;
+      }
+      
+      // Resolve relative paths
+      const resolvedPath = path.isAbsolute(linkPath) 
+        ? linkPath 
+        : path.join(workingDir, linkPath);
+      
+      linkedFiles.push(resolvedPath);
+    }
+    
+    // Also match raw file references in backticks
+    const backtickRegex = /`([^`]+\.[a-zA-Z]+)`/g;
+    while ((match = backtickRegex.exec(content)) !== null) {
+      const filePath = match[1];
+      
+      // Skip if it looks like code rather than a file path
+      if (filePath.includes('(') || filePath.includes(';') || filePath.includes('{')) {
+        continue;
+      }
+      
+      const resolvedPath = path.isAbsolute(filePath)
+        ? filePath
+        : path.join(workingDir, filePath);
+      
+      // Only include if it's a reasonable file path
+      if (resolvedPath.split(path.sep).length <= 10) {
+        linkedFiles.push(resolvedPath);
+      }
+    }
+    
+    // Remove duplicates
+    return [...new Set(linkedFiles)];
+  }
+
+  /**
    * Performs the code review
    */
   private async performReview(codeChanges: string): Promise<ReviewResult> {
     const config = this.configManager.getConfig();
     
-    // Load custom prompts if available
-    const customSystemPrompt = config.customPrompts?.system || 
-                              this.configManager.loadCustomPrompt('system') || 
-                              SYSTEM_PROMPT;
+    // Read project context files
+    const projectContext = await this.readProjectContext();
     
-    const reviewTemplate = config.customPrompts?.review || 
-                          this.configManager.loadCustomPrompt('review') || 
-                          REVIEW_PROMPT_TEMPLATE;
+    // Use comprehensive review if enabled
+    if (config.expansiveReview) {
+      // Load custom prompts or use comprehensive defaults
+      const customSystemPrompt = config.customPrompts?.system || 
+                                this.configManager.loadCustomPrompt('system') || 
+                                COMPREHENSIVE_SYSTEM_PROMPT;
+      
+      const reviewTemplate = config.customPrompts?.review || 
+                            this.configManager.loadCustomPrompt('review') || 
+                            COMPREHENSIVE_REVIEW_TEMPLATE;
 
-    // Prepare the user prompt
-    const userPrompt = populateTemplate(reviewTemplate, {
-      workingDirectory: process.cwd(),
-      filesChanged: this.extractFilePaths(codeChanges),
-      codeChanges
-    });
+      // Prepare the user prompt with project context
+      const userPromptTemplate = projectContext 
+        ? `${projectContext}\n\n${reviewTemplate}`
+        : reviewTemplate;
+        
+      const userPrompt = populateTemplate(userPromptTemplate, {
+        workingDirectory: process.cwd(),
+        filesChanged: this.extractFilePaths(codeChanges),
+        codeChanges
+      });
 
-    // Determine if we should use detailed model based on change size
-    const useDetailedModel = codeChanges.length > 500 || codeChanges.includes('security');
+      // Determine if we should use detailed model based on change size
+      const useDetailedModel = codeChanges.length > 500 || codeChanges.includes('security');
 
-    return await this.openaiClient.reviewCode(
-      customSystemPrompt,
-      userPrompt,
-      useDetailedModel
-    );
+      return await this.llmClient.comprehensiveReview(
+        customSystemPrompt,
+        userPrompt,
+        useDetailedModel
+      );
+    } else {
+      // Legacy review without codebase access
+      const customSystemPrompt = config.customPrompts?.system || 
+                                this.configManager.loadCustomPrompt('system') || 
+                                SYSTEM_PROMPT;
+      
+      const reviewTemplate = config.customPrompts?.review || 
+                            this.configManager.loadCustomPrompt('review') || 
+                            REVIEW_PROMPT_TEMPLATE;
+
+      // Prepare the user prompt with project context
+      const userPromptTemplate = projectContext 
+        ? `${projectContext}\n\n${reviewTemplate}`
+        : reviewTemplate;
+        
+      const userPrompt = populateTemplate(userPromptTemplate, {
+        workingDirectory: process.cwd(),
+        filesChanged: this.extractFilePaths(codeChanges),
+        codeChanges
+      });
+
+      // Determine if we should use detailed model based on change size
+      const useDetailedModel = codeChanges.length > 500 || codeChanges.includes('security');
+
+      return await this.llmClient.reviewCode(
+        customSystemPrompt,
+        userPrompt,
+        useDetailedModel
+      );
+    }
   }
 
   /**
@@ -213,12 +379,28 @@ ${input.content}`;
    * Makes a decision based on the review result
    */
   private makeDecision(review: ReviewResult): HookOutput {
+    let reason = '';
+    
+    // Add metrics to reason if available
+    if (review.metrics) {
+      const m = review.metrics;
+      reason = `Code Review Metrics:\n`;
+      reason += `• Security: ${m.security}/10\n`;
+      reason += `• Accuracy: ${m.accuracy}/10\n`;
+      reason += `• Algorithmic Efficiency: ${m.algorithmicEfficiency}/10\n`;
+      reason += `• Code Reuse: ${m.codeReuse}/10\n`;
+      reason += `• Operational Excellence: ${m.operationalExcellence}/10\n`;
+      reason += `• Style Compliance: ${m.styleCompliance}/10\n`;
+      reason += `• Object-Oriented Design: ${m.objectOriented}/10\n`;
+      reason += `• Architecture Patterns: ${m.patterns}/10\n\n`;
+    }
+    
     switch (review.approvalStatus) {
       case 'APPROVED':
         return {
           continue: true,
           decision: 'approve',
-          reason: 'Code review passed: No security or compliance issues found.'
+          reason: reason + 'Code review passed: No critical issues found.'
         };
 
       case 'NEEDS_CHANGES':
@@ -229,7 +411,7 @@ ${input.content}`;
         return {
           continue: false,
           decision: 'block',
-          reason: `Code review failed:\n${issues.join('\n')}`
+          reason: reason + `Code review failed:\n${issues.join('\n')}`
         };
 
       case 'REQUIRES_SECURITY_REVIEW':
@@ -237,14 +419,14 @@ ${input.content}`;
         return {
           continue: false,
           decision: 'block',
-          reason: `SECURITY REVIEW REQUIRED:\n${securityIssues.join('\n')}`
+          reason: reason + `SECURITY REVIEW REQUIRED:\n${securityIssues.join('\n')}`
         };
 
       default:
         return {
           continue: true,
           decision: 'approve',
-          reason: 'Review completed'
+          reason: reason + 'Review completed'
         };
     }
   }

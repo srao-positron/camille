@@ -1,0 +1,41 @@
+❌ Setup failed: Error: EACCES: permission denied, open '/Users/srao/.camille/config.json'
+    at Object.writeFileSync (node:fs:2426:20)
+    at ConfigManager.saveConfig (/Users/srao/camille/dist/config.js:118:12)
+    at ConfigManager.setApiKey (/Users/srao/camille/dist/config.js:135:14)
+    at SetupWizard.applyConfiguration (/Users/srao/camille/dist/setup-wizard.js:640:32)
+    at SetupWizard.run (/Users/srao/camille/dist/setup-wizard.js:103:24)
+    at process.processTicksAndRejections (node:internal/process/task_queues:105:5)
+    at async runSetupWizard (/Users/srao/camille/dist/setup-wizard.js:1039:5)
+    at async Command.<anonymous> (/Users/srao/camille/dist/cli.js:334:9) {
+  errno: -13,
+  code: 'EACCES',
+  syscall: 'open',
+  path: '/Users/srao/.camille/config.json'
+}
+
+Adding Camille at user level...
+Invalid environment variable format: camille, environment variables should be added as: -e KEY1=value1 -e KEY2=value2
+
+✗ Failed to add MCP server:
+Command failed: claude mcp add --scope user -e OPENAI_API_KEY=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 camille -- python3 /Users/srao/camille/mcp-pipe-proxy.py
+info: Created launchd service {"pid":15700,"plistPath":"/Users/srao/Library/LaunchAgents/com.camille.server.plist","service":"camille","timestamp":"2025-07-10 18:49:11.975","version":"0.1.0"}
+✔ Configuration applied successfully
+info: Configuration applied successfully {"pid":15700,"service":"camille","timestamp":"2025-07-10 18:49:11.975","version":"0.1.0"}
+
+🧪 Testing Setup
+
+⠋ Running setup tests...info: Running setup tests {"pid":15700,"service":"camille","timestamp":"2025-07-10 18:49:11.975","version":"0.1.0"}
+⠇ Testing OpenAI connection...info: Completion successful {"duration":660,"model":"gpt-4.1-mini","pid":15700,"responseLength":74,"service":"camille","timestamp":"2025-07-10 18:49:12.635","tokensUsed":29,"version":"0.1.0"}
+info: OpenAI API Call {"duration":660,"model":"gpt-4.1-mini","pid":15700,"service":"camille","success":true,"timestamp":"2025-07-10 18:49:12.635","tokens":29,"type":"openai_call","version":"0.1.0"}
+✔ OpenAI connection working
+✔ Directory access verified
+✔ MCP server configuration valid
+✔ Hooks configuration valid
+info: All tests passed {"pid":15700,"service":"camille","timestamp":"2025-07-10 18:49:12.636","version":"0.1.0"}
+
+🚀 Starting Camille server...
+
+✓ Server started successfully
+
+info: Server started after setup {"pid":15700,"service":"camille","timestamp":"2025-07-10 18:49:14.939","version":"0.1.0"}
+

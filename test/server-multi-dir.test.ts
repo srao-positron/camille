@@ -93,6 +93,7 @@ describe('Multi-Directory Server Functionality', () => {
     // Mock config manager
     jest.spyOn(ConfigManager.prototype, 'getApiKey').mockReturnValue('test-key');
     jest.spyOn(ConfigManager.prototype, 'getConfig').mockReturnValue({
+      provider: 'openai',
       openaiApiKey: 'test-key',
       models: {
         review: 'gpt-4-turbo-preview',
@@ -102,8 +103,9 @@ describe('Multi-Directory Server Functionality', () => {
       temperature: 0.1,
       maxTokens: 4000,
       cacheToDisk: false,
+      expansiveReview: false,
       ignorePatterns: ['node_modules/**', '*.log']
-    });
+    } as any);
 
     // Mock OpenAI client
     const mockOpenAIClient = {

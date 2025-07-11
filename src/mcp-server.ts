@@ -7,7 +7,7 @@ import { MCPServerWrapper, MCPServer } from './mcp-loader';
 import { ServerManager } from './server';
 import { CamilleHook } from './hook';
 import { SearchResult } from './embeddings';
-import { OpenAIClient } from './openai-client';
+import { LLMClient } from './llm-client';
 import { ConfigManager } from './config';
 import { logger } from './logger';
 import * as fs from 'fs';
@@ -18,35 +18,89 @@ import * as os from 'os';
 /**
  * MCP tool definitions for Claude
  */
-const TOOLS = {
+export const TOOLS = {
   /**
    * Search for code files using semantic similarity
    */
   searchCode: {
-    name: 'camille_search_code',
+    name: 'search_code',
     description: `Search for code files in the repository using semantic similarity.
-    
+
+## Overview
 This tool uses OpenAI embeddings to find files that are semantically similar to your query.
-It's particularly useful for finding:
-- Files implementing specific functionality
-- Code related to certain concepts or features
-- Similar code patterns across the codebase
-- Files that might be affected by a change
+It searches through the entire indexed codebase and returns the most relevant files based on
+conceptual similarity, not just keyword matching.
 
-The search returns the most relevant files with similarity scores and summaries.
-Higher similarity scores (closer to 1.0) indicate better matches.
+## When to Use This Tool
+1. **Before making changes** - Find all files that might be affected
+2. **Understanding the codebase** - Locate implementations of specific features
+3. **Finding examples** - Discover how certain patterns are used in the project
+4. **Impact analysis** - Identify files that might need updates when changing APIs
+5. **Code review preparation** - Find related code to review together
 
-IMPORTANT: This tool requires the Camille server to be running with an indexed codebase.
-The server must be started with: camille server start --mcp
+## Integration into Your Workflow
+- Always search before creating new files - there might be existing implementations
+- Search for related concepts when fixing bugs to find all affected areas
+- Use it to understand architectural patterns before making design decisions
+- Search for security-sensitive code when reviewing authentication/authorization changes
 
-Example queries:
-- "authentication and user login"
-- "database connection handling"
-- "error logging implementation"
-- "API endpoint for user management"
-- "functions that validate user input"
-- "code that handles file uploads"
-- "components that display error messages"`,
+## Example Queries and Expected Results
+
+### Example 1: Finding authentication code
+Query: "authentication and user login"
+Expected results:
+- Files containing login forms, auth middleware, session management
+- JWT token handling, OAuth implementations
+- User model with password hashing
+- Auth-related API endpoints
+
+### Example 2: Finding error handling
+Query: "error handling and logging"
+Expected results:
+- Global error handlers, try-catch blocks
+- Logging utilities and configurations
+- Error boundary components (React)
+- Custom error classes
+
+### Example 3: Finding data validation
+Query: "input validation and sanitization"
+Expected results:
+- Form validation logic
+- API request validators
+- Data sanitization functions
+- Schema definitions (Joi, Yup, Zod, etc.)
+
+## Example Output
+{
+  "results": [
+    {
+      "path": "src/auth/login.ts",
+      "similarity": "0.834",
+      "summary": "Handles user authentication with JWT tokens, password verification using bcrypt, and session management. Includes rate limiting and failed login tracking.",
+      "preview": "export async function login(email: string, password: string) {\\n  const user = await User.findOne({ email });\\n  if (!user || !await bcrypt.compare(password, user.passwordHash)) {\\n    throw new AuthenticationError('Invalid credentials');\\n  }..."
+    },
+    {
+      "path": "src/middleware/auth.ts",
+      "similarity": "0.782",
+      "summary": "Express middleware for JWT token validation, role-based access control, and API authentication. Handles token refresh and revocation.",
+      "preview": "export const requireAuth = async (req, res, next) => {\\n  const token = req.headers.authorization?.split(' ')[1];\\n  if (!token) return res.status(401).json({ error: 'No token provided' });..."
+    }
+  ],
+  "totalFiles": 127,
+  "indexStatus": {
+    "ready": true,
+    "filesIndexed": 127,
+    "isIndexing": false
+  }
+}
+
+## Pro Tips
+- Use conceptual queries rather than exact function names
+- Combine related concepts with "and" for better results
+- Results are sorted by similarity score (0-1, higher is better)
+- Check multiple results as related code might be spread across files
+- The summary provides context without opening the file
+- Use the preview to quickly assess if the file is relevant`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -58,6 +112,12 @@ Example queries:
           type: 'number',
           description: 'Maximum number of results to return (default: 10)',
           default: 10
+        },
+        responseFormat: {
+          type: 'string',
+          enum: ['json', 'text', 'both'],
+          description: 'Format for the response: json (raw data), text (formatted summary), both (default)',
+          default: 'both'
         }
       },
       required: ['query']
@@ -68,19 +128,139 @@ Example queries:
    * Validate code changes for compliance
    */
   validateChanges: {
-    name: 'camille_validate_changes',
+    name: 'validate_code',
     description: `Validate proposed code changes against project rules and security best practices.
 
-This tool performs a comprehensive review of code changes including:
-- Security vulnerability detection (injection, XSS, authentication flaws, etc.)
-- Compliance with CLAUDE.md and development rules
-- Code quality and best practices
-- Architecture consistency
+## Overview
+This tool performs AI-powered code review focusing on security vulnerabilities, compliance with
+project standards (CLAUDE.md), and code quality. It uses GPT-4 to analyze changes in context
+and provide actionable feedback before committing.
 
-The tool will automatically read CLAUDE.md and any referenced documentation to ensure
-complete compliance checking. It uses GPT-4 for detailed analysis with emphasis on security.
+## When to Use This Tool
+1. **Before every commit** - Catch security issues and bugs early
+2. **After significant refactoring** - Ensure architectural consistency
+3. **When adding external dependencies** - Check for security implications
+4. **Creating new API endpoints** - Validate authentication and input handling
+5. **Modifying security-sensitive code** - Get thorough security review
+6. **Before pull requests** - Pre-review to save reviewer time
 
-Use this before committing changes to ensure they meet all project standards.`,
+## Integration into Your Workflow
+- Run validation after making changes but before committing
+- Use it as a learning tool to understand project standards
+- Include validation results in pull request descriptions
+- Run on critical files even without changes to audit security
+- Use for onboarding to understand codebase standards
+
+## What It Checks
+
+### Security Vulnerabilities
+- SQL/NoSQL injection vulnerabilities
+- Cross-site scripting (XSS) risks
+- Authentication and authorization flaws
+- Insecure direct object references
+- Security misconfiguration
+- Sensitive data exposure
+- Using components with known vulnerabilities
+- Insufficient logging and monitoring
+
+### Project Compliance
+- Adherence to CLAUDE.md rules
+- Following established patterns
+- Consistent error handling
+- Proper TypeScript usage
+- Documentation requirements
+- Testing requirements
+
+### Code Quality
+- Complexity and maintainability
+- Performance implications
+- Proper async/await usage
+- Resource cleanup
+- Error handling completeness
+
+## Example Usage and Outputs
+
+### Example 1: SQL Injection Vulnerability
+Input:
+{
+  "filePath": "src/api/users.ts",
+  "changes": "const query = \`SELECT * FROM users WHERE id = '\${userId}'\`;\\ndb.query(query);",
+  "changeType": "edit"
+}
+
+Output:
+{
+  "approved": false,
+  "reason": "CRITICAL SECURITY ISSUE: SQL Injection vulnerability detected",
+  "needsChanges": true,
+  "details": {
+    "securityIssues": [
+      "Direct string interpolation in SQL query creates SQL injection vulnerability",
+      "User input 'userId' is not sanitized or parameterized",
+      "Attacker could execute arbitrary SQL commands"
+    ],
+    "complianceIssues": [
+      "Violates CLAUDE.md rule: 'Always use parameterized queries'"
+    ],
+    "suggestedFix": "Use parameterized query: db.query('SELECT * FROM users WHERE id = ?', [userId])"
+  }
+}
+
+### Example 2: Missing Authentication
+Input:
+{
+  "filePath": "src/api/admin.ts",
+  "changes": "router.post('/admin/users', async (req, res) => {\\n  const user = await User.create(req.body);\\n  res.json(user);\\n});",
+  "changeType": "create"
+}
+
+Output:
+{
+  "approved": false,
+  "reason": "SECURITY: Missing authentication and authorization checks",
+  "needsChanges": true,
+  "details": {
+    "securityIssues": [
+      "Admin endpoint lacks authentication middleware",
+      "No authorization check for admin role",
+      "No input validation on req.body",
+      "Potential mass assignment vulnerability"
+    ],
+    "suggestedFix": "Add requireAuth and requireRole('admin') middleware, validate input schema"
+  }
+}
+
+### Example 3: Good Code
+Input:
+{
+  "filePath": "src/utils/sanitize.ts",
+  "changes": "export function sanitizeHtml(input: string): string {\\n  return DOMPurify.sanitize(input, { ALLOWED_TAGS: ['b', 'i', 'em', 'strong'] });\\n}",
+  "changeType": "create"
+}
+
+Output:
+{
+  "approved": true,
+  "reason": "Code follows security best practices",
+  "needsChanges": false,
+  "details": {
+    "securityIssues": [],
+    "complianceIssues": [],
+    "positives": [
+      "Proper HTML sanitization using DOMPurify",
+      "Restrictive allowlist of HTML tags",
+      "TypeScript typing for safety"
+    ]
+  }
+}
+
+## Pro Tips
+- Always provide full file content for new files
+- Include surrounding context for edits when possible
+- Run on security-critical files regularly
+- Review the detailed feedback to learn patterns
+- Use suggested fixes as starting points
+- Combine with search tool to find similar patterns`,
     inputSchema: {
       type: 'object',
       properties: {
@@ -96,6 +276,12 @@ Use this before committing changes to ensure they meet all project standards.`,
           type: 'string',
           enum: ['edit', 'create', 'delete'],
           description: 'Type of change being made'
+        },
+        responseFormat: {
+          type: 'string',
+          enum: ['json', 'text', 'both'],
+          description: 'Format for the response: json (raw data), text (formatted summary), both (default)',
+          default: 'both'
         }
       },
       required: ['filePath', 'changes', 'changeType']
@@ -106,19 +292,136 @@ Use this before committing changes to ensure they meet all project standards.`,
    * Get Camille server status
    */
   getStatus: {
-    name: 'camille_status',
+    name: 'server_status',
     description: `Get the current status of the Camille server.
 
-Returns information about:
-- Whether the server is running
-- If indexing is in progress
-- Number of files in the index
-- Queue size for pending operations
+## Overview
+This tool provides real-time information about the Camille server's state, including indexing
+progress, readiness for searches, and system health. Use it to ensure the server is ready
+before performing operations or to debug issues.
 
-Use this to check if the index is ready before performing searches.`,
+## When to Use This Tool
+1. **Before searching** - Ensure index is ready for accurate results
+2. **After server start** - Monitor indexing progress
+3. **Debugging issues** - Check if server is running and healthy
+4. **Performance monitoring** - Track index size and queue status
+5. **CI/CD pipelines** - Wait for server readiness before tests
+
+## Integration into Your Workflow
+- Always check status when Claude Code session starts
+- Poll status after file changes to know when re-indexing completes
+- Use before search operations to ensure complete results
+- Include status checks in automated scripts
+- Monitor during large refactoring operations
+
+## Response Fields Explained
+
+### running (boolean)
+- true: Server is active and processing requests
+- false: Server is stopped or crashed
+
+### indexReady (boolean)
+- true: Initial indexing complete, searches will be accurate
+- false: Still indexing, search results may be incomplete
+
+### indexing (boolean)
+- true: Currently processing files (initial or updates)
+- false: No active indexing operations
+
+### filesIndexed (number)
+- Total number of files in the searchable index
+- Helps verify expected codebase coverage
+
+### queueSize (number)
+- Number of files waiting to be indexed
+- High numbers indicate heavy processing load
+
+## Example Outputs
+
+### Example 1: Server Starting Up
+{
+  "running": true,
+  "indexReady": false,
+  "indexing": true,
+  "filesIndexed": 45,
+  "queueSize": 82
+}
+Interpretation: Server is running but still doing initial indexing. 45 files done, 82 queued.
+
+### Example 2: Server Ready
+{
+  "running": true,
+  "indexReady": true,
+  "indexing": false,
+  "filesIndexed": 127,
+  "queueSize": 0
+}
+Interpretation: Server fully ready. All 127 files indexed, no pending work.
+
+### Example 3: Processing Updates
+{
+  "running": true,
+  "indexReady": true,
+  "indexing": true,
+  "filesIndexed": 125,
+  "queueSize": 3
+}
+Interpretation: Server is ready but processing 3 file changes. Searches remain accurate.
+
+### Example 4: Server Not Running
+{
+  "error": "Camille server is not running. Start with: camille server start"
+}
+Interpretation: Server needs to be started before using other tools.
+
+## Workflow Examples
+
+### Wait for Server Ready
+// Poll until index is ready
+let status;
+do {
+  status = await camille_status();
+  if (!status.indexReady) {
+    console.log(\`Indexing progress: \${status.filesIndexed} files completed...\`);
+    await sleep(2000);
+  }
+} while (!status.indexReady);
+
+### Health Check Function
+async function checkCamilleHealth() {
+  const status = await camille_status();
+  
+  if (!status.running) {
+    throw new Error('Camille server not running');
+  }
+  
+  if (!status.indexReady) {
+    console.warn('Index not ready, search results may be incomplete');
+  }
+  
+  if (status.queueSize > 50) {
+    console.warn('Heavy indexing load detected');
+  }
+  
+  return status;
+}
+
+## Pro Tips
+- Server typically indexes 50-100 files per minute
+- First-time indexing creates cache for faster restarts
+- High queue sizes are normal after large commits
+- indexReady=true means searches are reliable
+- Monitor status during long-running operations`,
     inputSchema: {
       type: 'object',
-      properties: {}
+      properties: {
+        responseFormat: {
+          type: 'string',
+          enum: ['json', 'text', 'both'],
+          description: 'Format for the response: json (raw data), text (formatted summary), both (default)',
+          default: 'both'
+        }
+      }
     }
   }
 };
@@ -162,11 +465,11 @@ export class CamilleMCPServer {
       const { name, arguments: args } = request.params;
 
       switch (name) {
-        case 'camille_search_code':
+        case 'search_code':
           return await this.handleSearchCode(args);
-        case 'camille_validate_changes':
+        case 'validate_code':
           return await this.handleValidateChanges(args);
-        case 'camille_status':
+        case 'server_status':
           return await this.handleGetStatus();
         default:
           throw new Error(`Unknown tool: ${name}`);
@@ -201,10 +504,9 @@ export class CamilleMCPServer {
     try {
       // Generate embedding for the query
       const config = this.configManager.getConfig();
-      const apiKey = this.configManager.getApiKey();
-      const openaiClient = new OpenAIClient(apiKey, config, process.cwd());
+      const llmClient = new LLMClient(config, process.cwd());
       
-      const queryEmbedding = await openaiClient.generateEmbedding(query);
+      const queryEmbedding = await llmClient.generateEmbedding(query);
       
       // Search the index
       const results = embeddingsIndex.search(queryEmbedding, limit);
@@ -234,6 +536,15 @@ export class CamilleMCPServer {
    */
   private async handleValidateChanges(args: any): Promise<any> {
     const { filePath, changes, changeType } = args;
+
+    // Require absolute paths
+    if (!path.isAbsolute(filePath)) {
+      return {
+        error: 'Absolute file path required. Please provide the full absolute path to the file.',
+        needsChanges: true,
+        approved: false
+      };
+    }
 
     try {
       const hook = new CamilleHook();

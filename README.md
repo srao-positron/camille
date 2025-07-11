@@ -1,6 +1,6 @@
 # Camille
 
-An intelligent code compliance checker and embedding search tool for Claude Code that uses OpenAI to validate code changes against project rules, security best practices, and architectural decisions.
+An intelligent code compliance checker and embedding search tool for Claude Code that uses Anthropic Claude or OpenAI to validate code changes against project rules, security best practices, and architectural decisions.
 
 ## Features
 
@@ -10,13 +10,19 @@ An intelligent code compliance checker and embedding search tool for Claude Code
 - **🪝 Claude Code Hook Integration**: Seamlessly integrates with Claude Code to review changes before they're applied
 - **🤖 MCP Server**: Provides tools to Claude for searching code and validating changes
 - **📁 Smart File Watching**: Automatically indexes new and changed files in real-time
-- **⚡ Performance Optimized**: Uses GPT-4.1-mini for routine checks and GPT-4.1 for complex analysis
+- **⚡ Performance Optimized**: Supports multiple LLM providers (Anthropic Claude recommended, OpenAI GPT alternative)
+- **🎯 Smart Model Selection**: Uses Claude Opus 4 or GPT-4o for detailed reviews, Haiku or GPT-4o-mini for quick checks
+- **📄 Context-Aware Reviews**: Automatically includes CLAUDE.md, README, and linked files in code reviews
 
 ## Installation
 
 ### From npm (when published)
 ```bash
-npm install -g camille
+# Install globally (requires sudo on most systems)
+sudo npm install -g camille
+
+# IMPORTANT: After installation, run setup WITHOUT sudo
+camille setup
 ```
 
 ### From GitHub (before npm publication)
@@ -25,8 +31,15 @@ git clone https://github.com/yourusername/camille.git
 cd camille
 npm install
 npm run build
-npm link
+
+# Install globally (requires sudo)
+sudo npm link
+
+# IMPORTANT: Run setup WITHOUT sudo
+camille setup
 ```
+
+⚠️ **Important**: While you need `sudo` to install globally, you must run `camille setup` WITHOUT sudo. Running setup with sudo will create files owned by root and cause permission errors later.
 
 ## Quick Start
 
@@ -36,7 +49,9 @@ camille setup
 ```
 
 This interactive wizard will help you:
-- Configure your OpenAI API key
+- Select your LLM provider (Anthropic Claude or OpenAI)
+- Choose models for different use cases with pricing information
+- Configure API keys (Anthropic and/or OpenAI)
 - Select directories to monitor
 - Set up Claude Code hooks
 - Configure MCP integration
@@ -44,10 +59,34 @@ This interactive wizard will help you:
 
 ### Or configure manually:
 
-#### Set your OpenAI API key
+#### Set API keys
 ```bash
-camille set-key YOUR_OPENAI_API_KEY
+# Set API key for current provider
+camille set-key YOUR_API_KEY
+
+# Set API key for specific provider
+camille set-key YOUR_API_KEY anthropic
+camille set-key YOUR_API_KEY openai
 ```
+
+#### Configure provider and models
+```bash
+# Set LLM provider (anthropic or openai)
+camille config set-provider anthropic
+
+# Set models for different use cases
+camille config set-model review claude-opus-4-20250514
+camille config set-model quick claude-3-5-haiku-20241022
+
+# List available models for a provider
+camille config list-models anthropic
+camille config list-models openai
+
+# Show current configuration
+camille config show
+```
+
+**Note**: OpenAI API key is always required for embeddings, even when using Anthropic for reviews.
 
 ### 2. Configure Claude Code hooks
 Add this to your Claude Code settings at `~/.claude/settings.json`:
@@ -266,7 +305,10 @@ camille config show
 Update configuration:
 ```bash
 # Change review model
-camille config set models.review gpt-4
+camille config set-model review claude-3-5-sonnet-20241022
+
+# Change provider
+camille config set-provider openai
 
 # Enable disk caching for embeddings
 camille config set cacheToDisk true
@@ -293,13 +335,16 @@ To customize prompts, create files in the prompts directory with your custom con
 
 | Option | Default | Description |
 |--------|---------|-------------|
-| `openaiApiKey` | - | Your OpenAI API key (required) |
-| `models.review` | `gpt-4-turbo-preview` | Model for detailed code review |
-| `models.quick` | `gpt-4o-mini` | Model for quick checks |
-| `models.embedding` | `text-embedding-3-small` | Model for generating embeddings |
+| `provider` | `anthropic` | LLM provider (`anthropic` or `openai`) |
+| `anthropicApiKey` | - | Your Anthropic API key (required when using Anthropic) |
+| `openaiApiKey` | - | Your OpenAI API key (always required for embeddings) |
+| `models.review` | `claude-opus-4-20250514` | Model for detailed code review |
+| `models.quick` | `claude-3-5-haiku-20241022` | Model for quick checks |
+| `models.embedding` | `text-embedding-3-large` | Model for generating embeddings (OpenAI only) |
 | `temperature` | `0.1` | Low temperature for consistent results |
 | `maxTokens` | `4000` | Maximum tokens for responses |
-| `cacheToDisk` | `false` | Whether to persist embeddings to disk |
+| `cacheToDisk` | `true` | Whether to persist embeddings to disk |
+| `expansiveReview` | `true` | Enable comprehensive reviews with codebase access |
 | `ignorePatterns` | `["node_modules/**", "*.log", ...]` | Files to ignore |
 
 ## How It Works
@@ -307,8 +352,9 @@ To customize prompts, create files in the prompts directory with your custom con
 ### Hook Mode
 1. Claude Code triggers the hook before making code changes
 2. Camille receives the proposed changes
-3. OpenAI reviews the changes for security, compliance, and quality
-4. Camille blocks dangerous changes or approves safe ones
+3. Your configured LLM (Anthropic Claude or OpenAI) reviews the changes for security, compliance, and quality
+4. CLAUDE.md, README, and linked files are automatically included for context
+5. Camille blocks dangerous changes or approves safe ones
 
 ### Server Mode
 1. Indexes all code files using OpenAI embeddings
@@ -316,17 +362,32 @@ To customize prompts, create files in the prompts directory with your custom con
 3. Provides semantic search through MCP
 4. Maintains an in-memory index with optional disk caching
 
+### Comprehensive Reviews (Default)
+When `expansiveReview` is enabled (default), Camille performs in-depth code analysis:
+1. Searches the codebase for similar code patterns
+2. Checks for duplicate code that could be refactored
+3. Validates consistency with existing code style
+4. Scores code across 8 dimensions (Security, Accuracy, Efficiency, etc.)
+5. Provides detailed metrics and actionable feedback
+
+To disable comprehensive reviews and use standard mode:
+```bash
+camille config set expansiveReview false
+```
+
 ## Security Considerations
 
-- **API Key Security**: Store your OpenAI API key securely using environment variables or the `set-key` command
-- **Code Privacy**: All code is sent to OpenAI for analysis. Ensure you have appropriate agreements in place
+- **API Key Security**: Store your API keys securely using environment variables or the `set-key` command
+- **Code Privacy**: All code is sent to your configured LLM provider (Anthropic or OpenAI) for analysis. Ensure you have appropriate agreements in place
 - **Hook Permissions**: Hooks run with your full user permissions. Camille validates changes but doesn't modify files directly
-- **Network Security**: All API calls are made over HTTPS to OpenAI's servers
+- **Network Security**: All API calls are made over HTTPS to your LLM provider's servers
 
 ## Troubleshooting
 
-### "OpenAI API key not configured"
-Run `camille set-key YOUR_KEY` or set the `OPENAI_API_KEY` environment variable.
+### "API key not configured"
+- For Anthropic: Run `camille set-key YOUR_KEY anthropic` or set the `ANTHROPIC_API_KEY` environment variable
+- For OpenAI: Run `camille set-key YOUR_KEY openai` or set the `OPENAI_API_KEY` environment variable
+- Note: OpenAI API key is always required for embeddings
 
 ### "Index is still building"
 Wait for initial indexing to complete. Check status with `camille server status`.

@@ -17,6 +17,7 @@ import { CamilleMCPServer } from './mcp-server';
 import { runHook } from './hook';
 import { runSetupWizard } from './setup-wizard';
 import { logger } from './logger';
+import { getModelsForProvider, getRecommendedModels, LLMProvider } from './providers';
 
 const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
 
@@ -34,13 +35,23 @@ program
  * Set API key command
  */
 program
-  .command('set-key <key>')
-  .description('Set your OpenAI API key')
-  .action((key: string) => {
+  .command('set-key <key> [provider]')
+  .description('Set API key for a provider (defaults to current provider)')
+  .action((key: string, provider?: string) => {
     try {
       const configManager = new ConfigManager();
-      configManager.setApiKey(key);
-      console.log(chalk.green('✅ OpenAI API key saved successfully'));
+      
+      // Validate provider if specified
+      if (provider && !['anthropic', 'openai'].includes(provider)) {
+        console.error(chalk.red(`Invalid provider: ${provider}. Must be 'anthropic' or 'openai'`));
+        process.exit(1);
+      }
+      
+      const targetProvider = provider as 'anthropic' | 'openai' | undefined;
+      configManager.setApiKey(key, targetProvider);
+      
+      const actualProvider = targetProvider || configManager.getProvider();
+      console.log(chalk.green(`✅ ${actualProvider === 'anthropic' ? 'Anthropic' : 'OpenAI'} API key saved successfully`));
       console.log(chalk.gray(`Configuration stored in: ${path.join(require('os').homedir(), '.camille')}`));
     } catch (error) {
       console.error(chalk.red('Error:', error));
@@ -59,10 +70,18 @@ server
   .command('start')
   .description('Start the Camille server with file watching and indexing')
   .option('-d, --directory <path...>', 'Directories to watch and index (can specify multiple)')
-  .option('--mcp', 'Also start the MCP server', false)
   .option('-q, --quiet', 'Suppress console output (daemon mode)', false)
   .action(async (options) => {
     try {
+      // Check if running as root
+      if (process.getuid && process.getuid() === 0) {
+        console.error(chalk.red('\n❌ Do not run the server with sudo!'));
+        console.error(chalk.yellow('\nThis will cause permission issues.'));
+        console.error(chalk.cyan('\nIf you have permission errors, run:'));
+        console.error(chalk.gray('  ./fix-permissions.sh\n'));
+        process.exit(1);
+      }
+      
       // Determine which directories to watch
       let directoriesToWatch: string[];
       
@@ -98,16 +117,8 @@ server
       
       // Let user know the server is ready for searches
       if (!options.quiet) {
-        console.log(chalk.gray('\nServer is ready. You can now use MCP tools to search the indexed codebase.'));
-      }
-
-      // Start MCP server if requested
-      if (options.mcp) {
-        // When MCP flag is set, run in stdio mode for Claude Code
-        // This means the server will communicate via stdin/stdout
-        const mcpServer = new CamilleMCPServer();
-        await mcpServer.start();
-        // The server runs in stdio mode, so the process should not exit
+        console.log(chalk.gray('\nServer is ready. The named pipe is listening for MCP connections.'));
+        console.log(chalk.gray('You can now use MCP tools to search the indexed codebase.'));
       }
 
       // Keep the process running and handle various termination signals
@@ -159,6 +170,63 @@ server
       await ServerManager.stop();
     } catch (error) {
       console.error(chalk.red('Error:', error));
+      process.exit(1);
+    }
+  });
+
+server
+  .command('restart')
+  .description('Restart the Camille server (stop and start)')
+  .action(async () => {
+    try {
+      console.log(chalk.blue('Restarting Camille server...'));
+      
+      // First stop the server
+      console.log(chalk.gray('Stopping server...'));
+      await ServerManager.stop();
+      
+      // Wait a moment for cleanup
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      // Clear the log files for fresh debugging
+      const logFiles = ['/tmp/camille-proxy.log', '/tmp/camille-mcp-server.log'];
+      for (const logFile of logFiles) {
+        if (fs.existsSync(logFile)) {
+          fs.writeFileSync(logFile, `=== SERVER RESTARTED AT ${new Date().toISOString()} ===\n\n`);
+          console.log(chalk.gray(`Cleared log file: ${logFile}`));
+        }
+      }
+      
+      // Start the server in background
+      console.log(chalk.gray('Starting server in background...'));
+      
+      // Use child_process to start server in background
+      const { spawn } = require('child_process');
+      const serverProcess = spawn('nohup', ['camille', 'server', 'start'], {
+        detached: true,
+        stdio: ['ignore', fs.openSync('/tmp/camille-server.out', 'a'), fs.openSync('/tmp/camille-server.out', 'a')]
+      });
+      
+      serverProcess.unref();
+      
+      // Wait a moment for server to start
+      await new Promise(resolve => setTimeout(resolve, 2000));
+      
+      // Check if server started successfully
+      const pidFilePath = path.join(os.homedir(), '.camille', 'server.pid');
+      if (fs.existsSync(pidFilePath)) {
+        const pid = parseInt(fs.readFileSync(pidFilePath, 'utf8').trim(), 10);
+        console.log(chalk.green(`✅ Server restarted successfully (PID: ${pid})`));
+      } else {
+        console.log(chalk.green('✅ Server restart initiated'));
+      }
+      
+      console.log(chalk.gray('Log files:'));
+      console.log(chalk.gray('  - MCP Server: /tmp/camille-mcp-server.log'));
+      console.log(chalk.gray('  - Python Proxy: /tmp/camille-proxy.log'));
+      console.log(chalk.gray('  - General: /tmp/camille.log'));
+    } catch (error) {
+      console.error(chalk.red('Error restarting server:', error));
       process.exit(1);
     }
   });
@@ -269,7 +337,8 @@ config
       console.log(chalk.blue('Current Configuration:'));
       console.log(JSON.stringify({
         ...cfg,
-        openaiApiKey: cfg.openaiApiKey ? '***' + cfg.openaiApiKey.slice(-4) : 'Not set'
+        openaiApiKey: cfg.openaiApiKey ? '***' + cfg.openaiApiKey.slice(-4) : 'Not set',
+        anthropicApiKey: cfg.anthropicApiKey ? '***' + cfg.anthropicApiKey.slice(-4) : 'Not set'
       }, null, 2));
     } catch (error) {
       console.error(chalk.red('Error:', error));
@@ -302,6 +371,146 @@ config
       
       configManager.updateConfig(updates);
       console.log(chalk.green('✅ Configuration updated'));
+    } catch (error) {
+      console.error(chalk.red('Error:', error));
+      process.exit(1);
+    }
+  });
+
+config
+  .command('set-provider <provider>')
+  .description('Set the LLM provider (anthropic or openai)')
+  .action((provider: string) => {
+    try {
+      if (!['anthropic', 'openai'].includes(provider)) {
+        console.error(chalk.red(`Invalid provider: ${provider}. Must be 'anthropic' or 'openai'`));
+        process.exit(1);
+      }
+      
+      const configManager = new ConfigManager();
+      configManager.setProvider(provider as 'anthropic' | 'openai');
+      console.log(chalk.green(`✅ Provider set to ${provider}`));
+      
+      // Check if API key is configured for this provider
+      const config = configManager.getConfig();
+      if (provider === 'anthropic' && !config.anthropicApiKey) {
+        console.log(chalk.yellow('\n⚠️  No Anthropic API key configured'));
+        console.log(chalk.gray('Run: camille set-key <your-key> anthropic'));
+      } else if (provider === 'openai' && !config.openaiApiKey) {
+        console.log(chalk.yellow('\n⚠️  No OpenAI API key configured'));
+        console.log(chalk.gray('Run: camille set-key <your-key> openai'));
+      }
+    } catch (error) {
+      console.error(chalk.red('Error:', error));
+      process.exit(1);
+    }
+  });
+
+config
+  .command('set-model <type> <model>')
+  .description('Set model for a specific use case (review or quick)')
+  .action((type: string, model: string) => {
+    try {
+      if (!['review', 'quick'].includes(type)) {
+        console.error(chalk.red(`Invalid type: ${type}. Must be 'review' or 'quick'`));
+        process.exit(1);
+      }
+      
+      const configManager = new ConfigManager();
+      const config = configManager.getConfig();
+      const provider = config.provider || 'openai';
+      const availableModels = getModelsForProvider(provider);
+      
+      // Validate model exists for provider
+      const modelInfo = availableModels.find(m => m.id === model);
+      if (!modelInfo) {
+        console.error(chalk.red(`Model '${model}' not available for provider '${provider}'`));
+        console.log(chalk.gray('\nAvailable models:'));
+        availableModels.forEach(m => {
+          console.log(chalk.gray(`  - ${m.id} (${m.name})`));
+        });
+        process.exit(1);
+      }
+      
+      // Update model config
+      const updates = {
+        models: {
+          ...config.models,
+          [type]: model
+        }
+      };
+      configManager.updateConfig(updates);
+      console.log(chalk.green(`✅ ${type} model set to ${model}`));
+    } catch (error) {
+      console.error(chalk.red('Error:', error));
+      process.exit(1);
+    }
+  });
+
+config
+  .command('list-models [provider]')
+  .description('List available models for a provider')
+  .action((provider?: string) => {
+    try {
+      const configManager = new ConfigManager();
+      const targetProvider = provider || configManager.getProvider();
+      
+      if (provider && !['anthropic', 'openai'].includes(provider)) {
+        console.error(chalk.red(`Invalid provider: ${provider}. Must be 'anthropic' or 'openai'`));
+        process.exit(1);
+      }
+      
+      const models = getModelsForProvider(targetProvider as LLMProvider);
+      const recommended = getRecommendedModels(targetProvider as LLMProvider);
+      
+      console.log(chalk.blue(`\nAvailable models for ${targetProvider}:\n`));
+      
+      // Group by use case
+      const reviewModels = models.filter(m => m.supportsTools);
+      const quickModels = models.filter(m => m.supportsTools && m.pricing.input <= 5);
+      const embeddingModels = models.filter(m => m.id.includes('embedding'));
+      
+      if (reviewModels.length > 0) {
+        console.log(chalk.yellow('Code Review Models:'));
+        reviewModels.forEach(m => {
+          const isRecommended = m.id === recommended.review.id;
+          console.log(`  ${chalk.cyan(m.id)} - ${m.name}`);
+          console.log(`    Price: $${m.pricing.input}/$${m.pricing.output} per 1M tokens`);
+          if (m.description) {
+            console.log(`    ${chalk.gray(m.description)}`);
+          }
+          if (isRecommended) {
+            console.log(`    ${chalk.green('✓ Recommended')}`);
+          }
+          console.log();
+        });
+      }
+      
+      if (quickModels.length > 0) {
+        console.log(chalk.yellow('Quick Check Models:'));
+        quickModels.forEach(m => {
+          const isRecommended = m.id === recommended.quick.id;
+          console.log(`  ${chalk.cyan(m.id)} - ${m.name}`);
+          console.log(`    Price: $${m.pricing.input}/$${m.pricing.output} per 1M tokens`);
+          if (isRecommended) {
+            console.log(`    ${chalk.green('✓ Recommended')}`);
+          }
+          console.log();
+        });
+      }
+      
+      if (embeddingModels.length > 0 && targetProvider === 'openai') {
+        console.log(chalk.yellow('Embedding Models:'));
+        embeddingModels.forEach(m => {
+          const isRecommended = recommended.embedding && m.id === recommended.embedding.id;
+          console.log(`  ${chalk.cyan(m.id)} - ${m.name}`);
+          console.log(`    Price: $${m.pricing.input} per 1M tokens`);
+          if (isRecommended) {
+            console.log(`    ${chalk.green('✓ Recommended')}`);
+          }
+          console.log();
+        });
+      }
     } catch (error) {
       console.error(chalk.red('Error:', error));
       process.exit(1);

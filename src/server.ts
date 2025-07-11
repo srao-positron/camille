@@ -72,10 +72,11 @@ export class CamilleServer {
       watchedDirectories: []
     };
     
-    // Set up named pipe path
+    // Set up named pipe path in ~/.camille directory for consistency
+    const pipeDir = process.env.CAMILLE_CONFIG_DIR || path.join(os.homedir(), '.camille');
     this.pipePath = process.platform === 'win32' 
       ? '\\\\.\\pipe\\camille-mcp'
-      : path.join(os.tmpdir(), 'camille-mcp.sock');
+      : path.join(pipeDir, 'camille-mcp.sock');
   }
 
   /**
@@ -87,41 +88,61 @@ export class CamilleServer {
     
     this.status.isRunning = true;
     
+    // Start the named pipe server IMMEDIATELY for MCP communication
+    await this.startPipeServer();
+    consoleOutput.info(chalk.green('✅ MCP server ready - accepting connections'));
+    
     // Normalize to array
     const dirsToWatch = Array.isArray(directories) ? directories : [directories];
-    
-    // Add all directories
-    for (const dir of dirsToWatch) {
-      await this.addDirectory(dir);
-    }
     
     // If no directories to watch, mark index as ready
     if (dirsToWatch.length === 0) {
       this.embeddingsIndex.setReady(true);
+      consoleOutput.info(chalk.gray('No directories to index'));
+    } else {
+      // Start indexing directories in the background
+      consoleOutput.info(chalk.gray('Starting background indexing...'));
+      this.startBackgroundIndexing(dirsToWatch);
     }
-    
-    // Wait for index to be ready before reporting server as started
-    if (!this.embeddingsIndex.isIndexReady()) {
-      consoleOutput.info(chalk.gray('Waiting for initial indexing to complete...'));
-      // Poll until index is ready
-      while (!this.embeddingsIndex.isIndexReady()) {
-        await new Promise(resolve => setTimeout(resolve, 100));
-      }
-    }
-    
-    consoleOutput.success('✅ Camille server is running and index is ready');
-    consoleOutput.info(chalk.gray(`Indexed files: ${this.embeddingsIndex.getIndexSize()}`));
-    
-    // Start the named pipe server for MCP communication
-    await this.startPipeServer();
     
     logger.logServerEvent('server_started', { 
       directories: this.getWatchedDirectories(),
-      indexSize: this.embeddingsIndex.getIndexSize() 
+      pipeReady: true,
+      indexing: dirsToWatch.length > 0
     });
     
     // Set up config file watching
     this.setupConfigWatcher();
+  }
+
+  /**
+   * Starts indexing directories in the background
+   */
+  private async startBackgroundIndexing(directories: string[]): Promise<void> {
+    // Don't await - let it run in background
+    (async () => {
+      try {
+        for (const dir of directories) {
+          await this.addDirectory(dir);
+        }
+        
+        // Wait for index to be ready
+        while (!this.embeddingsIndex.isIndexReady()) {
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        
+        consoleOutput.success('✅ Indexing complete');
+        consoleOutput.info(chalk.gray(`Indexed files: ${this.embeddingsIndex.getIndexSize()}`));
+        
+        logger.logServerEvent('indexing_completed', { 
+          directories: this.getWatchedDirectories(),
+          indexSize: this.embeddingsIndex.getIndexSize() 
+        });
+      } catch (error) {
+        logger.error('Background indexing failed', error as Error);
+        consoleOutput.error(`Background indexing failed: ${error}`);
+      }
+    })();
   }
 
   /**
@@ -269,24 +290,65 @@ export class CamilleServer {
 
     // Create the named pipe server
     this.pipeServer = net.createServer((socket) => {
-      logger.info('MCP client connected via named pipe');
+      const clientId = Date.now();
+      logger.info('MCP client connected via named pipe', { clientId, pipePath: this.pipePath });
+      
+      // Also log to dedicated MCP file
+      fs.appendFileSync('/tmp/camille-mcp-server.log', 
+        `[${new Date().toISOString()}] CLIENT CONNECTED: ${clientId}\n`);
       
       let buffer = '';
+      let requestCount = 0;
       
       socket.on('data', async (data) => {
-        buffer += data.toString();
+        const dataStr = data.toString();
+        buffer += dataStr;
+        
+        // Log raw data received
+        fs.appendFileSync('/tmp/camille-mcp-server.log', 
+          `[${new Date().toISOString()}] [${clientId}] RAW DATA (${data.length} bytes): ${dataStr.substring(0, 200)}...\n`);
+        
         const lines = buffer.split('\n');
         
         // Process complete lines
         while (lines.length > 1) {
           const line = lines.shift()!;
           if (line.trim()) {
+            requestCount++;
+            const requestId = `${clientId}-${requestCount}`;
+            
+            fs.appendFileSync('/tmp/camille-mcp-server.log', 
+              `[${new Date().toISOString()}] [${requestId}] PROCESSING LINE: ${line}\n`);
+            
             try {
               const request = JSON.parse(line);
+              
+              fs.appendFileSync('/tmp/camille-mcp-server.log', 
+                `[${new Date().toISOString()}] [${requestId}] PARSED REQUEST: ${JSON.stringify(request)}\n`);
+              
+              logger.info('MCP request received', { requestId, method: request.method, id: request.id });
+              
               const response = await this.handleMCPRequest(request);
+              
+              // Handle null responses (for notifications)
+              if (response === null) {
+                fs.appendFileSync('/tmp/camille-mcp-server.log', 
+                  `[${new Date().toISOString()}] [${requestId}] NO RESPONSE (notification)\n`);
+                continue;
+              }
+              
+              fs.appendFileSync('/tmp/camille-mcp-server.log', 
+                `[${new Date().toISOString()}] [${requestId}] SENDING RESPONSE: ${JSON.stringify(response)}\n`);
+              
+              logger.info('MCP response sent', { requestId, hasResult: !!response?.result, hasError: !!response?.error });
+              
               socket.write(JSON.stringify(response) + '\n');
             } catch (error) {
-              logger.error('Error handling MCP request', error);
+              logger.error('Error handling MCP request', { requestId, error });
+              
+              fs.appendFileSync('/tmp/camille-mcp-server.log', 
+                `[${new Date().toISOString()}] [${requestId}] ERROR: ${error}\n${error instanceof Error ? error.stack : ''}\n`);
+              
               const errorResponse = {
                 jsonrpc: '2.0',
                 error: {
@@ -305,11 +367,15 @@ export class CamilleServer {
       });
       
       socket.on('error', (error: Error) => {
-        logger.error('Named pipe socket error', error);
+        logger.error('Named pipe socket error', { clientId, error });
+        fs.appendFileSync('/tmp/camille-mcp-server.log', 
+          `[${new Date().toISOString()}] [${clientId}] SOCKET ERROR: ${error}\n`);
       });
       
       socket.on('close', () => {
-        logger.info('MCP client disconnected');
+        logger.info('MCP client disconnected', { clientId });
+        fs.appendFileSync('/tmp/camille-mcp-server.log', 
+          `[${new Date().toISOString()}] [${clientId}] CLIENT DISCONNECTED\n\n`);
       });
     });
 
@@ -329,98 +395,150 @@ export class CamilleServer {
    * Handles MCP requests received via named pipe
    */
   private async handleMCPRequest(request: any): Promise<any> {
-    logger.debug('Handling MCP request', { method: request.method });
+    const startTime = Date.now();
+    logger.debug('Handling MCP request', { method: request.method, id: request.id });
     
-    // Import MCP handlers
-    const { CamilleMCPServer } = require('./mcp-server');
-    const mcpServer = new CamilleMCPServer();
+    fs.appendFileSync('/tmp/camille-mcp-server.log', 
+      `[${new Date().toISOString()}] HANDLE MCP REQUEST: ${request.method} (id: ${request.id})\n`);
     
-    // Route the request to appropriate handler
-    if (request.method === 'tools/list') {
-      return mcpServer['server'].handleRequest(request);
-    } else if (request.method === 'tools/call') {
-      const { name, arguments: args } = request.params;
+    // Use the MCP protocol server to handle all protocol messages
+    if (!this.mcpProtocolServer) {
+      fs.appendFileSync('/tmp/camille-mcp-server.log', 
+        `[${new Date().toISOString()}] INITIALIZING MCP PROTOCOL SERVER\n`);
+      const { MCPProtocolServer } = require('./mcp-protocol');
+      const { TOOLS } = require('./mcp-server');
       
-      switch (name) {
-        case 'camille_search_code':
-          // Use our local embeddings index
-          return await this.handleSearchCode(args);
-          
-        case 'camille_validate_changes':
-          // Forward to hook for validation
-          const { CamilleHook } = require('./hook');
-          const hook = new CamilleHook();
-          return await this.handleValidateChanges(args, hook);
-          
-        case 'camille_status':
-          return {
-            jsonrpc: '2.0',
-            result: {
-              running: true,
-              indexReady: this.embeddingsIndex.isIndexReady(),
-              indexing: this.status.isIndexing,
-              filesIndexed: this.embeddingsIndex.getIndexSize(),
-              queueSize: this.indexQueue.size
-            },
-            id: request.id
-          };
-          
-        default:
-          throw new Error(`Unknown tool: ${name}`);
-      }
+      // Create MCP protocol server
+      this.mcpProtocolServer = new MCPProtocolServer(
+        { name: 'camille', version: '0.1.0' },
+        { tools: { listChanged: true } }
+      );
+      
+      // Register tools
+      this.mcpProtocolServer.registerTool(TOOLS.searchCode, async (args: any) => {
+        const result = await this.handleSearchCode(args);
+        return result && result.result ? result.result : result;
+      });
+      
+      this.mcpProtocolServer.registerTool(TOOLS.validateChanges, async (args: any) => {
+        const { CamilleHook } = require('./hook');
+        const hook = new CamilleHook();
+        const result = await this.handleValidateChanges(args, hook);
+        return result && result.result ? result.result : result;
+      });
+      
+      this.mcpProtocolServer.registerTool(TOOLS.getStatus, async (args: any) => {
+        const result = await this.handleGetStatus(args);
+        return result;
+      });
     }
     
-    throw new Error(`Unknown method: ${request.method}`);
+    // Handle message through protocol server
+    try {
+      fs.appendFileSync('/tmp/camille-mcp-server.log', 
+        `[${new Date().toISOString()}] CALLING handleMessage for: ${request.method}\n`);
+      
+      const response = await this.mcpProtocolServer.handleMessage(request);
+      const duration = Date.now() - startTime;
+      
+      fs.appendFileSync('/tmp/camille-mcp-server.log', 
+        `[${new Date().toISOString()}] HANDLE MCP COMPLETE: ${request.method} took ${duration}ms, response: ${JSON.stringify(response)}\n`);
+      
+      logger.debug('MCP request handled', { method: request.method, duration, hasResult: response ? !!response.result : false });
+      
+      return response;
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      
+      fs.appendFileSync('/tmp/camille-mcp-server.log', 
+        `[${new Date().toISOString()}] HANDLE MCP ERROR: ${request.method} failed after ${duration}ms: ${error}\n`);
+      
+      throw error;
+    }
   }
+  
+  private mcpProtocolServer: any;
 
   /**
    * Handles code search requests
    */
   private async handleSearchCode(args: any): Promise<any> {
-    const { query, limit = 10 } = args;
-    
-    if (!this.embeddingsIndex.isIndexReady()) {
-      return {
-        jsonrpc: '2.0',
-        error: {
-          code: -32000,
-          message: 'Index is still building. Please wait for initial indexing to complete.'
-        }
-      };
-    }
+    const { query, limit = 10, responseFormat = 'both' } = args;
     
     try {
       const queryEmbedding = await this.openaiClient.generateEmbedding(query);
       const results = this.embeddingsIndex.search(queryEmbedding, limit);
       
-      return {
-        jsonrpc: '2.0',
-        result: {
-          results: results.map((result: SearchResult) => ({
-            path: path.relative(process.cwd(), result.path),
-            similarity: result.similarity.toFixed(3),
-            summary: result.summary || 'No summary available',
-            preview: result.content.substring(0, 200) + '...'
-          })),
-          totalFiles: this.embeddingsIndex.getIndexSize()
+      const jsonResult: any = {
+        results: results.map((result: SearchResult) => ({
+          path: path.relative(process.cwd(), result.path),
+          similarity: result.similarity.toFixed(3),
+          summary: result.summary || 'No summary available',
+          preview: result.content.substring(0, 200) + '...'
+        })),
+        totalFiles: this.embeddingsIndex.getIndexSize(),
+        indexStatus: {
+          ready: this.embeddingsIndex.isIndexReady(),
+          filesIndexed: this.embeddingsIndex.getIndexSize(),
+          isIndexing: this.status.isIndexing
         }
       };
+      
+      // Add warning if still indexing
+      if (!this.embeddingsIndex.isIndexReady()) {
+        jsonResult.warning = 'Index is still building. Results may be incomplete.';
+        logger.info('Search performed while indexing', { 
+          query, 
+          resultsFound: results.length,
+          filesIndexedSoFar: this.embeddingsIndex.getIndexSize() 
+        });
+      }
+      
+      // Format response based on requested format
+      if (responseFormat === 'json') {
+        return jsonResult;
+      } else if (responseFormat === 'text') {
+        return this.formatSearchResultsAsText(query, jsonResult);
+      } else {
+        // 'both' format
+        return {
+          json: jsonResult,
+          text: this.formatSearchResultsAsText(query, jsonResult)
+        };
+      }
     } catch (error) {
-      return {
-        jsonrpc: '2.0',
-        error: {
-          code: -32603,
-          message: `Search failed: ${error instanceof Error ? error.message : 'Unknown error'}`
-        }
-      };
+      throw error; // Let MCP protocol handle errors
     }
+  }
+  
+  private formatSearchResultsAsText(query: string, results: any): string {
+    let text = `Camille Code Search Results\n`;
+    text += `Query: "${query}"\n`;
+    text += `${'═'.repeat(50)}\n\n`;
+    
+    if (results.warning) {
+      text += `WARNING: ${results.warning}\n\n`;
+    }
+    
+    text += `Found ${results.results.length} relevant files (out of ${results.totalFiles} total)\n\n`;
+    
+    results.results.forEach((result: any, index: number) => {
+      text += `${index + 1}. ${result.path} (similarity: ${result.similarity})\n`;
+      text += `   Summary: ${result.summary}\n`;
+      text += `   Preview: ${result.preview}\n\n`;
+    });
+    
+    text += `\nIndex Status: ${results.indexStatus.ready ? 'Ready' : 'Indexing...'}`;
+    text += ` (${results.indexStatus.filesIndexed} files indexed)`;
+    
+    return text;
   }
 
   /**
    * Handles validation requests
    */
   private async handleValidateChanges(args: any, hook: any): Promise<any> {
-    const { filePath, changes, changeType } = args;
+    const { filePath, changes, changeType, responseFormat = 'both' } = args;
     
     try {
       const mockInput = {
@@ -439,25 +557,121 @@ export class CamilleServer {
       };
 
       const result = await hook.processHook(mockInput);
-
-      return {
-        jsonrpc: '2.0',
-        result: {
-          approved: result.decision === 'approve',
-          reason: result.reason,
-          needsChanges: result.decision === 'block',
-          details: this.parseValidationDetails(result.reason || '')
-        }
+      
+      const jsonResult = {
+        approved: result.decision === 'approve',
+        reason: result.reason,
+        needsChanges: result.decision === 'block',
+        details: this.parseValidationDetails(result.reason || '')
       };
+
+      // Format response based on requested format
+      if (responseFormat === 'json') {
+        return jsonResult;
+      } else if (responseFormat === 'text') {
+        return this.formatValidationResultAsText(filePath, changeType, jsonResult);
+      } else {
+        // 'both' format
+        return {
+          json: jsonResult,
+          text: this.formatValidationResultAsText(filePath, changeType, jsonResult)
+        };
+      }
     } catch (error) {
+      throw error; // Let MCP protocol handle errors
+    }
+  }
+  
+  private formatValidationResultAsText(filePath: string, changeType: string, result: any): string {
+    let text = `Camille Security & Compliance Report\n`;
+    text += `${'═'.repeat(50)}\n\n`;
+    text += `File: ${filePath}\n`;
+    text += `Change Type: ${changeType}\n`;
+    text += `Status: ${result.approved ? 'APPROVED' : 'NEEDS CHANGES'}\n\n`;
+    
+    if (result.reason) {
+      text += `Summary:\n${result.reason}\n\n`;
+    }
+    
+    if (result.details) {
+      if (result.details.securityIssues?.length > 0) {
+        text += `Security Issues:\n`;
+        result.details.securityIssues.forEach((issue: string) => {
+          text += `  • ${issue}\n`;
+        });
+        text += '\n';
+      }
+      
+      if (result.details.complianceIssues?.length > 0) {
+        text += `Compliance Issues:\n`;
+        result.details.complianceIssues.forEach((issue: string) => {
+          text += `  • ${issue}\n`;
+        });
+        text += '\n';
+      }
+      
+      if (result.details.qualityIssues?.length > 0) {
+        text += `Code Quality Issues:\n`;
+        result.details.qualityIssues.forEach((issue: string) => {
+          text += `  • ${issue}\n`;
+        });
+        text += '\n';
+      }
+      
+      if (result.details.suggestedFix) {
+        text += `Suggested Fix:\n${result.details.suggestedFix}\n`;
+      }
+    }
+    
+    return text.trim();
+  }
+  
+  /**
+   * Handles status requests
+   */
+  private async handleGetStatus(args: any): Promise<any> {
+    const { responseFormat = 'both' } = args;
+    
+    const jsonResult = {
+      running: true,
+      indexReady: this.embeddingsIndex.isIndexReady(),
+      indexing: this.status.isIndexing,
+      filesIndexed: this.embeddingsIndex.getIndexSize(),
+      queueSize: this.indexQueue.size
+    };
+    
+    // Format response based on requested format
+    if (responseFormat === 'json') {
+      return jsonResult;
+    } else if (responseFormat === 'text') {
+      return this.formatStatusAsText(jsonResult);
+    } else {
+      // 'both' format
       return {
-        jsonrpc: '2.0',
-        error: {
-          code: -32603,
-          message: `Validation failed: ${error instanceof Error ? error.message : 'Unknown error'}`
-        }
+        json: jsonResult,
+        text: this.formatStatusAsText(jsonResult)
       };
     }
+  }
+  
+  private formatStatusAsText(status: any): string {
+    let text = `Camille Server Status\n`;
+    text += `${'═'.repeat(50)}\n\n`;
+    
+    text += `Server: ${status.running ? 'Running' : 'Stopped'}\n`;
+    text += `Index: ${status.indexReady ? 'Ready' : 'Building...'}\n`;
+    text += `Status: ${status.indexing ? 'Indexing files...' : 'Idle'}\n\n`;
+    
+    text += `Files Indexed: ${status.filesIndexed}\n`;
+    if (status.queueSize > 0) {
+      text += `Queue: ${status.queueSize} files pending\n`;
+    }
+    
+    if (!status.indexReady) {
+      text += `\nNote: Search results may be incomplete until indexing finishes.\n`;
+    }
+    
+    return text.trim();
   }
 
   /**
@@ -515,12 +729,20 @@ export class CamilleServer {
       
       // Add all files to the queue
       let processed = 0;
+      let skipped = 0;
       for (const file of filesToIndex) {
         this.indexQueue.add(async () => {
-          await this.indexFile(file);
+          // Check if file needs indexing (use cache if available)
+          if (this.embeddingsIndex.needsReindex(file)) {
+            await this.indexFile(file);
+          } else {
+            skipped++;
+            logger.debug('Using cached embedding', { path: file });
+          }
           processed++;
           if (this.spinner) {
-            this.spinner.text = `Indexing files... (${processed}/${filesToIndex.length})`;
+            const skipText = skipped > 0 ? ` (${skipped} cached)` : '';
+            this.spinner.text = `Indexing files... (${processed}/${filesToIndex.length})${skipText}`;
           }
         });
       }
@@ -528,11 +750,18 @@ export class CamilleServer {
       // Wait for all indexing to complete
       await this.indexQueue.onIdle();
       
-      if (this.spinner) this.spinner.succeed(`Indexed ${filesToIndex.length} files`);
-      consoleOutput.success(`Indexed ${filesToIndex.length} files`);
+      const newlyIndexed = filesToIndex.length - skipped;
+      const message = skipped > 0 
+        ? `Indexed ${newlyIndexed} new files, used cache for ${skipped} files`
+        : `Indexed ${filesToIndex.length} files`;
+      
+      if (this.spinner) this.spinner.succeed(message);
+      consoleOutput.success(message);
       logger.logServerEvent('indexing_completed', { 
         directory, 
-        filesIndexed: filesToIndex.length 
+        totalFiles: filesToIndex.length,
+        newlyIndexed,
+        cachedFiles: skipped
       });
       this.embeddingsIndex.setReady(true);
       
@@ -632,7 +861,10 @@ export class CamilleServer {
    */
   private async reindexFile(filePath: string): Promise<void> {
     if (this.embeddingsIndex.needsReindex(filePath)) {
+      logger.info('File needs re-indexing', { path: filePath });
       await this.indexFile(filePath);
+    } else {
+      logger.debug('File unchanged, skipping re-index', { path: filePath });
     }
   }
 
