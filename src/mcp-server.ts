@@ -112,12 +112,6 @@ Expected results:
           type: 'number',
           description: 'Maximum number of results to return (default: 10)',
           default: 10
-        },
-        responseFormat: {
-          type: 'string',
-          enum: ['json', 'text', 'both'],
-          description: 'Format for the response: json (raw data), text (formatted summary), both (default)',
-          default: 'both'
         }
       },
       required: ['query']
@@ -276,12 +270,6 @@ Output:
           type: 'string',
           enum: ['edit', 'create', 'delete'],
           description: 'Type of change being made'
-        },
-        responseFormat: {
-          type: 'string',
-          enum: ['json', 'text', 'both'],
-          description: 'Format for the response: json (raw data), text (formatted summary), both (default)',
-          default: 'both'
         }
       },
       required: ['filePath', 'changes', 'changeType']
@@ -414,14 +402,7 @@ async function checkCamilleHealth() {
 - Monitor status during long-running operations`,
     inputSchema: {
       type: 'object',
-      properties: {
-        responseFormat: {
-          type: 'string',
-          enum: ['json', 'text', 'both'],
-          description: 'Format for the response: json (raw data), text (formatted summary), both (default)',
-          default: 'both'
-        }
-      }
+      properties: {}
     }
   }
 };
@@ -481,7 +462,7 @@ export class CamilleMCPServer {
    * Handles code search requests
    */
   private async handleSearchCode(args: any): Promise<any> {
-    const { query, limit = 10, responseFormat = 'both' } = args;
+    const { query, limit = 10 } = args;
 
     // Check if server is running
     const server = ServerManager.getInstance();
@@ -519,22 +500,18 @@ export class CamilleMCPServer {
         preview: result.content.substring(0, 200) + '...'
       }));
 
-      const data = {
+      // Generate text summary
+      let textSummary = `Found ${formattedResults.length} matching files out of ${embeddingsIndex.getIndexSize()} indexed files:\n\n`;
+      for (const result of formattedResults) {
+        textSummary += `📄 ${result.path} (${result.similarity} similarity)\n`;
+        textSummary += `   ${result.summary}\n\n`;
+      }
+
+      return {
         results: formattedResults,
-        totalFiles: embeddingsIndex.getIndexSize()
+        totalFiles: embeddingsIndex.getIndexSize(),
+        summary: textSummary.trim()
       };
-
-      // Text formatter for search results
-      const textFormatter = (d: any) => {
-        let text = `Found ${d.results.length} matching files out of ${d.totalFiles} indexed files:\n\n`;
-        for (const result of d.results) {
-          text += `📄 ${result.path} (${result.similarity} similarity)\n`;
-          text += `   ${result.summary}\n\n`;
-        }
-        return text;
-      };
-
-      return this.formatResponse(data, responseFormat, textFormatter);
 
     } catch (error) {
       return {
@@ -547,7 +524,7 @@ export class CamilleMCPServer {
    * Handles validation requests
    */
   private async handleValidateChanges(args: any): Promise<any> {
-    const { filePath, changes, changeType, responseFormat = 'both' } = args;
+    const { filePath, changes, changeType } = args;
 
     // Require absolute paths
     if (!path.isAbsolute(filePath)) {
@@ -582,37 +559,35 @@ export class CamilleMCPServer {
 
       const result = await hook.processHook(mockInput);
 
-      const data = {
-        approved: result.decision === 'approve',
+      const approved = result.decision === 'approve';
+      const details = this.parseValidationDetails(result.reason || '');
+
+      // Generate text summary
+      let textSummary = approved ? '✅ Code approved\n\n' : '❌ Code requires changes\n\n';
+      
+      if (result.reason) {
+        textSummary += `${result.reason}\n\n`;
+      }
+
+      if (details) {
+        if (details.securityIssues?.length > 0) {
+          textSummary += `Security Issues:\n${details.securityIssues.map((i: string) => `- ${i}`).join('\n')}\n\n`;
+        }
+        if (details.complianceIssues?.length > 0) {
+          textSummary += `Compliance Issues:\n${details.complianceIssues.map((i: string) => `- ${i}`).join('\n')}\n\n`;
+        }
+        if (details.qualityIssues?.length > 0) {
+          textSummary += `Quality Issues:\n${details.qualityIssues.map((i: string) => `- ${i}`).join('\n')}\n\n`;
+        }
+      }
+
+      return {
+        approved,
         reason: result.reason,
         needsChanges: result.decision === 'block',
-        details: this.parseValidationDetails(result.reason || '')
+        details,
+        summary: textSummary.trim()
       };
-
-      // Text formatter for validation results
-      const textFormatter = (d: any) => {
-        let text = d.approved ? '✅ Code approved\n\n' : '❌ Code requires changes\n\n';
-        
-        if (d.reason) {
-          text += `${d.reason}\n\n`;
-        }
-
-        if (d.details) {
-          if (d.details.securityIssues?.length > 0) {
-            text += `Security Issues:\n${d.details.securityIssues.map((i: string) => `- ${i}`).join('\n')}\n\n`;
-          }
-          if (d.details.complianceIssues?.length > 0) {
-            text += `Compliance Issues:\n${d.details.complianceIssues.map((i: string) => `- ${i}`).join('\n')}\n\n`;
-          }
-          if (d.details.qualityIssues?.length > 0) {
-            text += `Quality Issues:\n${d.details.qualityIssues.map((i: string) => `- ${i}`).join('\n')}\n\n`;
-          }
-        }
-
-        return text.trim();
-      };
-
-      return this.formatResponse(data, responseFormat, textFormatter);
 
     } catch (error) {
       return {
@@ -625,8 +600,6 @@ export class CamilleMCPServer {
    * Handles status requests
    */
   private async handleGetStatus(args: any = {}): Promise<any> {
-    const { responseFormat = 'both' } = args;
-    
     const server = ServerManager.getInstance();
     
     if (!server) {
@@ -637,26 +610,28 @@ export class CamilleMCPServer {
     }
 
     const status = server.getStatus();
-    const data = {
-      running: status.isRunning,
-      indexReady: server.getEmbeddingsIndex().isIndexReady(),
-      indexing: status.isIndexing,
-      filesIndexed: status.indexSize,
-      queueSize: status.queueSize
-    };
+    const running = status.isRunning;
+    const indexReady = server.getEmbeddingsIndex().isIndexReady();
+    const indexing = status.isIndexing;
+    const filesIndexed = status.indexSize;
+    const queueSize = status.queueSize;
 
-    // Text formatter for status
-    const textFormatter = (d: any) => {
-      let text = `Camille Server Status:\n`;
-      text += `- Running: ${d.running ? 'Yes' : 'No'}\n`;
-      text += `- Index Ready: ${d.indexReady ? 'Yes' : 'No'}\n`;
-      text += `- Currently Indexing: ${d.indexing ? 'Yes' : 'No'}\n`;
-      text += `- Files Indexed: ${d.filesIndexed}\n`;
-      text += `- Queue Size: ${d.queueSize}`;
-      return text;
-    };
+    // Generate text summary
+    let textSummary = `Camille Server Status:\n`;
+    textSummary += `- Running: ${running ? 'Yes' : 'No'}\n`;
+    textSummary += `- Index Ready: ${indexReady ? 'Yes' : 'No'}\n`;
+    textSummary += `- Currently Indexing: ${indexing ? 'Yes' : 'No'}\n`;
+    textSummary += `- Files Indexed: ${filesIndexed}\n`;
+    textSummary += `- Queue Size: ${queueSize}`;
 
-    return this.formatResponse(data, responseFormat, textFormatter);
+    return {
+      running,
+      indexReady,
+      indexing,
+      filesIndexed,
+      queueSize,
+      summary: textSummary
+    };
   }
 
   /**
@@ -697,34 +672,6 @@ export class CamilleMCPServer {
     }
 
     return details;
-  }
-
-  /**
-   * Formats response based on responseFormat parameter
-   */
-  private formatResponse(data: any, responseFormat: string = 'both', textFormatter?: (data: any) => string): any {
-    // If there's an error, always return it as-is
-    if (data.error) {
-      return data;
-    }
-
-    // Default text formatter if none provided
-    const formatText = textFormatter || ((d: any) => JSON.stringify(d, null, 2));
-
-    switch (responseFormat) {
-      case 'json':
-        return data;
-      
-      case 'text':
-        return { text: formatText(data) };
-      
-      case 'both':
-      default:
-        return {
-          text: formatText(data),
-          json: data
-        };
-    }
   }
 
   /**

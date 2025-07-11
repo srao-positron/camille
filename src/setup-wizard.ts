@@ -933,13 +933,32 @@ export class SetupWizard {
   private async createClaudeCodeSettings(hooksConfig: any, mcpConfig: any, spinner?: Ora): Promise<void> {
     // Handle hooks configuration in ~/.claude/settings.json
     if (hooksConfig.enabled) {
+      // Determine the hook command based on installation context
+      let hookCommand: string;
+      
+      // Check if we're in development (running from source)
+      const devHookPath = path.join(__dirname, '..', 'bin', 'camille-hook.sh');
+      if (fs.existsSync(devHookPath)) {
+        // Use absolute path in development
+        hookCommand = devHookPath;
+      } else {
+        // In production, check for global/local installation
+        const npmBinPath = path.join(__dirname, '..', '..', 'bin', 'camille-hook.sh');
+        if (fs.existsSync(npmBinPath)) {
+          hookCommand = npmBinPath;
+        } else {
+          // Fallback to using the camille command directly
+          hookCommand = 'camille hook';
+        }
+      }
+      
       let settings: any = {
         hooks: {
           PreToolUse: [{
-            matcher: hooksConfig.tools.join('|'),
+            matcher: 'Edit|MultiEdit|Write|Update|Create',  // Match specific code editing tools
             hooks: [{
               type: 'command',
-              command: 'camille hook'
+              command: hookCommand
             }]
           }]
         }

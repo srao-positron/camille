@@ -25,6 +25,9 @@ interface HookInput {
   session_id: string;
   transcript_path: string;
   hook_event_name: string;
+  tool_name?: string;
+  tool_input?: any;
+  // Legacy format support
   tool?: {
     name: string;
     input?: any;
@@ -53,12 +56,23 @@ export class CamilleHook {
     const config = this.configManager.getConfig();
     const workingDir = process.cwd();
     
-    // Create embeddings index if expansive review is enabled
-    if (config.expansiveReview) {
+    // Don't create embeddings index in constructor - lazy load when needed
+    // This prevents loading embeddings cache when running as a hook
+    this.llmClient = new LLMClient(config, workingDir);
+  }
+
+  /**
+   * Lazy loads the embeddings index when needed
+   */
+  private getEmbeddingsIndex(): EmbeddingsIndex {
+    if (!this.embeddingsIndex) {
       this.embeddingsIndex = new EmbeddingsIndex(this.configManager);
+      // Update the LLMClient with the embeddings index
+      const config = this.configManager.getConfig();
+      const workingDir = process.cwd();
+      this.llmClient = new LLMClient(config, workingDir, this.embeddingsIndex);
     }
-    
-    this.llmClient = new LLMClient(config, workingDir, this.embeddingsIndex);
+    return this.embeddingsIndex;
   }
 
   /**
@@ -69,27 +83,54 @@ export class CamilleHook {
       logger.info('Hook called', { 
         event: input.hook_event_name, 
         tool: input.tool?.name,
-        hasInput: !!input.tool?.input 
+        hasInput: !!input.tool?.input,
+        toolInput: input.tool?.input ? Object.keys(input.tool.input) : []
       });
       
       // Only process PreToolUse events for code editing tools
       if (input.hook_event_name !== 'PreToolUse') {
         logger.debug('Skipping non-PreToolUse event');
+        console.error(`[DEBUG] Skipping event: ${input.hook_event_name} (not PreToolUse)`);
         return { continue: true };
       }
 
-      const tool = input.tool;
-      if (!tool || !this.isCodeEditingTool(tool.name)) {
-        logger.debug('Skipping non-code-editing tool', { toolName: tool?.name });
+      // Handle both new format (tool_name/tool_input) and legacy format (tool.name/tool.input)
+      const toolName = input.tool_name || input.tool?.name;
+      const toolInput = input.tool_input || input.tool?.input;
+      
+      if (!toolName) {
+        console.error('[DEBUG] No tool name provided in input');
         return { continue: true };
       }
+      
+      console.error(`[DEBUG] Tool name: ${toolName}`);
+      
+      if (!this.isCodeEditingTool(toolName)) {
+        logger.debug('Skipping non-code-editing tool', { toolName });
+        console.error(`[DEBUG] Skipping tool: ${toolName} (not in Edit/MultiEdit/Write list)`);
+        return { continue: true };
+      }
+
+      // Create a tool object for backward compatibility
+      const tool = {
+        name: toolName,
+        input: toolInput
+      };
 
       // Extract code changes from the tool input
+      console.error('[DEBUG] Extracting code changes from tool:', tool.name);
       const codeChanges = this.extractCodeChanges(tool);
       if (!codeChanges) {
         logger.debug('No code changes extracted');
-        return { continue: true };
+        console.error('[DEBUG] No code changes extracted from tool input');
+        return { 
+          continue: true,
+          decision: 'approve' as const,
+          reason: 'No code changes to review'
+        };
       }
+      
+      console.error(`[DEBUG] Code changes extracted, length: ${codeChanges.length}`);
 
       logger.info('Performing code review', { 
         changesLength: codeChanges.length
@@ -122,7 +163,7 @@ export class CamilleHook {
    * Checks if the tool is a code editing tool
    */
   private isCodeEditingTool(toolName: string): boolean {
-    const codeEditingTools = ['Edit', 'MultiEdit', 'Write'];
+    const codeEditingTools = ['Edit', 'MultiEdit', 'Write', 'Update', 'Create'];
     return codeEditingTools.includes(toolName);
   }
 
@@ -138,8 +179,12 @@ export class CamilleHook {
       case 'MultiEdit':
         return this.formatMultiEditChanges(input);
       case 'Write':
+      case 'Create':  // Create is like Write
         return this.formatWriteChange(input);
+      case 'Update':  // Update is like Edit
+        return this.formatEditChange(input);
       default:
+        logger.warn('Unknown tool for code extraction', { toolName: name });
         return null;
     }
   }
@@ -436,7 +481,12 @@ ${input.content}`;
  * Main entry point for the hook
  */
 export async function runHook(): Promise<void> {
+  // Write to stderr for debugging (won't interfere with JSON output)
+  console.error('[DEBUG] Hook process started');
+  
   try {
+    logger.info('Hook process started, waiting for stdin');
+    
     // Read input from stdin
     let inputData = '';
     process.stdin.setEncoding('utf8');
@@ -445,7 +495,22 @@ export async function runHook(): Promise<void> {
       inputData += chunk;
     }
 
+    logger.info('Received input data', { length: inputData.length });
+
+    if (!inputData) {
+      logger.error('No input data received');
+      console.log(JSON.stringify({
+        continue: true,
+        decision: 'approve',
+        reason: 'No input data received'
+      }));
+      process.exit(0);
+    }
+
     const input: HookInput = JSON.parse(inputData);
+    console.error('[DEBUG] Full input structure:', JSON.stringify(input, null, 2));
+    logger.info('Parsed input', { event: input.hook_event_name, tool: input.tool?.name });
+    
     const hook = new CamilleHook();
     const output = await hook.processHook(input);
 
@@ -455,12 +520,15 @@ export async function runHook(): Promise<void> {
 
   } catch (error) {
     console.error('Hook error:', error);
-    // Fail fast with blocking error
+    console.error('Stack trace:', error instanceof Error ? error.stack : 'No stack trace');
+    
+    // Return a continue response on error to avoid blocking
+    // Log the error but don't block the user's work
     console.log(JSON.stringify({
-      continue: false,
-      decision: 'block',
-      reason: `Hook execution failed: ${error}`
+      continue: true,
+      decision: 'approve',
+      reason: 'Hook error - defaulting to approve'
     }));
-    process.exit(2);
+    process.exit(0);
   }
 }

@@ -949,16 +949,21 @@ export class CamilleServer {
    * Generates a summary of a file for better search
    */
   private async generateFileSummary(filePath: string, content: string): Promise<string> {
-    const truncatedContent = content.substring(0, 4000);
-    const prompt = `${EMBEDDING_PROMPT}\n\nFile: ${path.basename(filePath)}\nContent:\n${truncatedContent}`;
+    // Generate a simple summary without using LLM to avoid complexity
+    // File summaries are just for search context, not critical
+    const ext = path.extname(filePath);
+    const basename = path.basename(filePath);
+    const lines = content.split('\n').length;
+    const chars = content.length;
     
-    try {
-      const summary = await this.openaiClient.complete(prompt);
-      return summary.substring(0, 500); // Limit summary length
-    } catch (error) {
-      logger.error('Failed to generate summary', error, { filePath });
-      return '';
-    }
+    // Extract first meaningful line (skip comments and empty lines)
+    const meaningfulLines = content.split('\n')
+      .map(line => line.trim())
+      .filter(line => line && !line.startsWith('//') && !line.startsWith('#') && !line.startsWith('/*'));
+    
+    const preview = meaningfulLines[0] || '';
+    
+    return `${basename} - ${ext.slice(1).toUpperCase() || 'text'} file with ${lines} lines, ${chars} chars. ${preview.substring(0, 100)}`;
   }
 }
 

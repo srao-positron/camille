@@ -42,6 +42,26 @@ try {
     console.log('Copied MCP proxy script');
   }
   
+  // Copy bin directory with hook script
+  const binSource = path.join(__dirname, '..', 'bin');
+  const binDest = path.join(distDir, '..', 'bin');
+  if (fs.existsSync(binSource)) {
+    if (!fs.existsSync(binDest)) {
+      fs.mkdirSync(binDest, { recursive: true });
+    }
+    const files = fs.readdirSync(binSource);
+    files.forEach(file => {
+      const src = path.join(binSource, file);
+      const dest = path.join(binDest, file);
+      fs.copyFileSync(src, dest);
+      // Make shell scripts executable
+      if (file.endsWith('.sh')) {
+        fs.chmodSync(dest, '755');
+      }
+    });
+    console.log('Copied bin directory');
+  }
+  
   console.log('\n✅ Build completed successfully!');
   
 } catch (error) {
