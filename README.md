@@ -95,7 +95,7 @@ Add this to your Claude Code settings at `~/.claude/settings.json`:
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Edit|MultiEdit|Write",
+        "matcher": "Edit|MultiEdit|Write|Update|Create",
         "hooks": [
           {
             "type": "command",
@@ -429,7 +429,7 @@ Contributions are welcome! Please:
 
 ## License
 
-MIT License - see LICENSE file for details
+Apache 2 - See LICENSE file for details
 
 ## Acknowledgments
 
