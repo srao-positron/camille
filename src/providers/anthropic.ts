@@ -47,6 +47,29 @@ function convertToAnthropicMessages(messages: LLMMessage[]): Anthropic.MessagePa
           content: msg.content
         }]
       });
+    } else if (msg.role === 'assistant' && msg.tool_calls) {
+      // Assistant message with tool calls
+      const content: any[] = [];
+      
+      // Add text content if present
+      if (msg.content) {
+        content.push({ type: 'text', text: msg.content });
+      }
+      
+      // Add tool use blocks
+      for (const toolCall of msg.tool_calls) {
+        content.push({
+          type: 'tool_use',
+          id: toolCall.id,
+          name: toolCall.function.name,
+          input: JSON.parse(toolCall.function.arguments)
+        });
+      }
+      
+      anthropicMessages.push({
+        role: 'assistant',
+        content
+      });
     } else {
       // Regular user/assistant messages
       anthropicMessages.push({

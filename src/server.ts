@@ -13,6 +13,7 @@ import PQueue from 'p-queue';
 import ora from 'ora';
 import chalk from 'chalk';
 import { ConfigManager } from './config';
+import { LLMClient } from './llm-client';
 import { OpenAIClient } from './openai-client';
 import { EmbeddingsIndex, FileFilter, SearchResult } from './embeddings';
 import { EMBEDDING_PROMPT } from './prompts';
@@ -35,6 +36,7 @@ export interface ServerStatus {
  */
 export class CamilleServer {
   private configManager: ConfigManager;
+  private llmClient: LLMClient;
   private openaiClient: OpenAIClient;
   private embeddingsIndex: EmbeddingsIndex;
   private fileFilter: FileFilter;
@@ -51,9 +53,11 @@ export class CamilleServer {
   constructor() {
     this.configManager = new ConfigManager();
     const config = this.configManager.getConfig();
-    const apiKey = this.configManager.getApiKey();
     
-    this.openaiClient = new OpenAIClient(apiKey, config, process.cwd());
+    this.llmClient = new LLMClient(config, process.cwd());
+    // Always use OpenAI API key for embeddings, regardless of provider
+    const openaiApiKey = this.configManager.getOpenAIApiKey();
+    this.openaiClient = new OpenAIClient(openaiApiKey, config, process.cwd());
     this.embeddingsIndex = new EmbeddingsIndex(this.configManager);
     this.fileFilter = new FileFilter(config.ignorePatterns);
     
@@ -927,6 +931,7 @@ export class CamilleServer {
         // Update other settings
         const config = this.configManager.getConfig();
         this.fileFilter = new FileFilter(config.ignorePatterns);
+        this.llmClient = new LLMClient(config, process.cwd());
         this.openaiClient = new OpenAIClient(this.configManager.getApiKey(), config, process.cwd());
         
         consoleOutput.success('✅ Configuration reloaded');

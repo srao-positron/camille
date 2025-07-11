@@ -470,7 +470,7 @@ export class CamilleMCPServer {
         case 'validate_code':
           return await this.handleValidateChanges(args);
         case 'server_status':
-          return await this.handleGetStatus();
+          return await this.handleGetStatus(args);
         default:
           throw new Error(`Unknown tool: ${name}`);
       }
@@ -481,7 +481,7 @@ export class CamilleMCPServer {
    * Handles code search requests
    */
   private async handleSearchCode(args: any): Promise<any> {
-    const { query, limit = 10 } = args;
+    const { query, limit = 10, responseFormat = 'both' } = args;
 
     // Check if server is running
     const server = ServerManager.getInstance();
@@ -519,10 +519,22 @@ export class CamilleMCPServer {
         preview: result.content.substring(0, 200) + '...'
       }));
 
-      return {
+      const data = {
         results: formattedResults,
         totalFiles: embeddingsIndex.getIndexSize()
       };
+
+      // Text formatter for search results
+      const textFormatter = (d: any) => {
+        let text = `Found ${d.results.length} matching files out of ${d.totalFiles} indexed files:\n\n`;
+        for (const result of d.results) {
+          text += `📄 ${result.path} (${result.similarity} similarity)\n`;
+          text += `   ${result.summary}\n\n`;
+        }
+        return text;
+      };
+
+      return this.formatResponse(data, responseFormat, textFormatter);
 
     } catch (error) {
       return {
@@ -535,7 +547,7 @@ export class CamilleMCPServer {
    * Handles validation requests
    */
   private async handleValidateChanges(args: any): Promise<any> {
-    const { filePath, changes, changeType } = args;
+    const { filePath, changes, changeType, responseFormat = 'both' } = args;
 
     // Require absolute paths
     if (!path.isAbsolute(filePath)) {
@@ -570,12 +582,37 @@ export class CamilleMCPServer {
 
       const result = await hook.processHook(mockInput);
 
-      return {
+      const data = {
         approved: result.decision === 'approve',
         reason: result.reason,
         needsChanges: result.decision === 'block',
         details: this.parseValidationDetails(result.reason || '')
       };
+
+      // Text formatter for validation results
+      const textFormatter = (d: any) => {
+        let text = d.approved ? '✅ Code approved\n\n' : '❌ Code requires changes\n\n';
+        
+        if (d.reason) {
+          text += `${d.reason}\n\n`;
+        }
+
+        if (d.details) {
+          if (d.details.securityIssues?.length > 0) {
+            text += `Security Issues:\n${d.details.securityIssues.map((i: string) => `- ${i}`).join('\n')}\n\n`;
+          }
+          if (d.details.complianceIssues?.length > 0) {
+            text += `Compliance Issues:\n${d.details.complianceIssues.map((i: string) => `- ${i}`).join('\n')}\n\n`;
+          }
+          if (d.details.qualityIssues?.length > 0) {
+            text += `Quality Issues:\n${d.details.qualityIssues.map((i: string) => `- ${i}`).join('\n')}\n\n`;
+          }
+        }
+
+        return text.trim();
+      };
+
+      return this.formatResponse(data, responseFormat, textFormatter);
 
     } catch (error) {
       return {
@@ -587,7 +624,9 @@ export class CamilleMCPServer {
   /**
    * Handles status requests
    */
-  private async handleGetStatus(): Promise<any> {
+  private async handleGetStatus(args: any = {}): Promise<any> {
+    const { responseFormat = 'both' } = args;
+    
     const server = ServerManager.getInstance();
     
     if (!server) {
@@ -598,13 +637,26 @@ export class CamilleMCPServer {
     }
 
     const status = server.getStatus();
-    return {
+    const data = {
       running: status.isRunning,
       indexReady: server.getEmbeddingsIndex().isIndexReady(),
       indexing: status.isIndexing,
       filesIndexed: status.indexSize,
       queueSize: status.queueSize
     };
+
+    // Text formatter for status
+    const textFormatter = (d: any) => {
+      let text = `Camille Server Status:\n`;
+      text += `- Running: ${d.running ? 'Yes' : 'No'}\n`;
+      text += `- Index Ready: ${d.indexReady ? 'Yes' : 'No'}\n`;
+      text += `- Currently Indexing: ${d.indexing ? 'Yes' : 'No'}\n`;
+      text += `- Files Indexed: ${d.filesIndexed}\n`;
+      text += `- Queue Size: ${d.queueSize}`;
+      return text;
+    };
+
+    return this.formatResponse(data, responseFormat, textFormatter);
   }
 
   /**
@@ -645,6 +697,34 @@ export class CamilleMCPServer {
     }
 
     return details;
+  }
+
+  /**
+   * Formats response based on responseFormat parameter
+   */
+  private formatResponse(data: any, responseFormat: string = 'both', textFormatter?: (data: any) => string): any {
+    // If there's an error, always return it as-is
+    if (data.error) {
+      return data;
+    }
+
+    // Default text formatter if none provided
+    const formatText = textFormatter || ((d: any) => JSON.stringify(d, null, 2));
+
+    switch (responseFormat) {
+      case 'json':
+        return data;
+      
+      case 'text':
+        return { text: formatText(data) };
+      
+      case 'both':
+      default:
+        return {
+          text: formatText(data),
+          json: data
+        };
+    }
   }
 
   /**

@@ -15,7 +15,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { glob } from 'glob';
 import { ConfigManager } from './config';
-import { OpenAIClient } from './openai-client';
+import { LLMClient } from './llm-client';
 import { Logger } from './logger';
 import { spawn } from 'child_process';
 import { 
@@ -253,13 +253,19 @@ export class SetupWizard {
     const quickModels = availableModels.filter(m => m.supportsTools && m.pricing.input <= 5);
     const embeddingModels = availableModels.filter(m => m.id.includes('embedding'));
 
-    console.log(chalk.gray('Select models for different use cases:\n'));
+    console.log(chalk.gray('Camille uses different models for different scenarios:\n'));
+    console.log(chalk.gray('• Review Model: For comprehensive security analysis and code quality checks'));
+    console.log(chalk.gray('• Quick Model: For routine checks and smaller code changes\n'));
 
     // Select review model
+    console.log(chalk.yellow('\n1. Review Model Selection'));
+    console.log(chalk.gray('Used for: Security analysis, compliance checks, architecture reviews'));
+    console.log(chalk.gray('When: Complex changes, security-sensitive code, full file reviews\n'));
+    
     const { reviewModel } = await inquirer.prompt([{
       type: 'list',
       name: 'reviewModel',
-      message: 'Select model for detailed code reviews:',
+      message: 'Select your review model:',
       choices: reviewModels.map(model => ({
         name: `${model.name} - $${model.pricing.input}/${model.pricing.output} per 1M tokens ${model.id === recommendedModels.review.id ? chalk.green('(Recommended)') : ''}`,
         value: model.id,
@@ -269,10 +275,14 @@ export class SetupWizard {
     }]);
 
     // Select quick model
+    console.log(chalk.yellow('\n2. Quick Check Model Selection'));
+    console.log(chalk.gray('Used for: Simple edits, formatting changes, minor updates'));
+    console.log(chalk.gray('When: Small changes under 500 characters, non-security code\n'));
+    
     const { quickModel } = await inquirer.prompt([{
       type: 'list',
       name: 'quickModel',
-      message: 'Select model for quick checks:',
+      message: 'Select your quick check model:',
       choices: quickModels.map(model => ({
         name: `${model.name} - $${model.pricing.input}/${model.pricing.output} per 1M tokens ${model.id === recommendedModels.quick.id ? chalk.green('(Recommended)') : ''}`,
         value: model.id,
@@ -1169,15 +1179,20 @@ WantedBy=default.target`;
 
     try {
       // Test 1: API connection
-      spinner.text = 'Testing OpenAI connection...';
+      spinner.text = 'Testing LLM connection...';
       const config = this.configManager.getConfig();
-      const client = new OpenAIClient(
-        this.configManager.getApiKey(),
+      const client = new LLMClient(
         config,
         process.cwd()
       );
-      await client.complete('Hello, this is a test');
-      spinner.succeed('OpenAI connection working');
+      
+      // Test with a simple completion
+      await client.reviewCode(
+        'You are a helpful assistant.',
+        'Say "Hello, test successful!" if you can process this message.',
+        false // Use quick model for testing
+      );
+      spinner.succeed(`${config.provider === 'anthropic' ? 'Anthropic' : 'OpenAI'} connection working`);
 
       // Test 2: Directory access
       spinner.start('Testing directory access...');
