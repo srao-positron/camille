@@ -61,7 +61,7 @@ export const consoleOutput = {
   warning: (message: string) => output(chalk.yellow(message), 'warn'),
   error: (message: string) => output(chalk.red(message), 'error'),
   debug: (message: string) => {
-    if (!isQuietMode() && process.env.DEBUG) {
+    if (!isQuietMode() && process.env.DEBUG !== undefined) {
       output(chalk.gray(message), 'info');
     }
     logger.debug(stripAnsi(message));

@@ -103,23 +103,11 @@ server
 
       // Start MCP server if requested
       if (options.mcp) {
+        // When MCP flag is set, run in stdio mode for Claude Code
+        // This means the server will communicate via stdin/stdout
         const mcpServer = new CamilleMCPServer();
         await mcpServer.start();
-        
-        if (!options.quiet) {
-          console.log(chalk.blue('\n📡 MCP Server Configuration:'));
-          console.log(chalk.gray('Add this to your Claude Code settings:'));
-          console.log(chalk.yellow(`
-{
-  "mcpServers": {
-    "camille": {
-      "transport": "pipe",
-      "pipeName": "${mcpServer.getPipePath()}"
-    }
-  }
-}
-`));
-        }
+        // The server runs in stdio mode, so the process should not exit
       }
 
       // Keep the process running and handle various termination signals
@@ -178,52 +166,7 @@ server
 server
   .command('status')
   .description('Check server status')
-  .option('--test-pipe', 'Test MCP pipe connection')
-  .action(async (options: any) => {
-    // Test pipe connection if requested
-    if (options.testPipe) {
-      const pipePath = process.platform === 'win32' 
-        ? '\\\\.\\pipe\\camille-mcp'
-        : path.join(os.tmpdir(), 'camille-mcp.sock');
-      
-      console.log(chalk.blue('Testing MCP pipe connection...'));
-      console.log(chalk.gray(`Pipe path: ${pipePath}`));
-      
-      try {
-        const net = require('net');
-        const client = net.createConnection(pipePath);
-        
-        await new Promise<void>((resolve, reject) => {
-          client.on('connect', () => {
-            console.log(chalk.green('✅ Successfully connected to MCP pipe'));
-            console.log(chalk.gray('The central Camille service is running and accepting connections'));
-            client.end();
-            resolve();
-          });
-          
-          client.on('error', (err: any) => {
-            if (err.code === 'ENOENT' || err.code === 'ECONNREFUSED') {
-              console.log(chalk.red('❌ Could not connect to MCP pipe'));
-              console.log(chalk.yellow('Make sure the Camille server is running with --mcp flag:'));
-              console.log(chalk.cyan('  camille server start --mcp'));
-            } else {
-              console.log(chalk.red(`❌ Connection error: ${err.message}`));
-            }
-            reject(err);
-          });
-          
-          // Timeout after 2 seconds
-          setTimeout(() => {
-            client.destroy();
-            reject(new Error('Connection timeout'));
-          }, 2000);
-        });
-      } catch (error) {
-        // Error already logged
-      }
-      
-      return;
-    }
+  .action(async () => {
     
     const instance = ServerManager.getInstance();
     
@@ -396,8 +339,10 @@ program
  */
 program
   .command('init-mcp [directory]')
-  .description('Create .mcp.json file in a directory')
-  .action(async (directory?: string) => {
+  .description('Add Camille MCP server to Claude Code')
+  .option('-s, --scope <scope>', 'Configuration scope: user, project, or local', 'local')
+  .action(async (directory?: string, options?: any) => {
+    const { execSync } = require('child_process');
     const targetDir = directory ? path.resolve(directory) : process.cwd();
     
     if (!fs.existsSync(targetDir) || !fs.statSync(targetDir).isDirectory()) {
@@ -405,39 +350,53 @@ program
       process.exit(1);
     }
     
-    const mcpPath = path.join(targetDir, '.mcp.json');
-    
-    if (fs.existsSync(mcpPath)) {
-      const { overwrite } = await inquirer.prompt([{
-        type: 'confirm',
-        name: 'overwrite',
-        message: '.mcp.json already exists. Overwrite?',
-        default: false
-      }]);
-      
-      if (!overwrite) {
-        console.log(chalk.gray('Cancelled'));
-        return;
-      }
+    // Check if claude command is available
+    try {
+      execSync('claude --version', { stdio: 'ignore' });
+    } catch {
+      console.error(chalk.red('Error: Claude Code CLI not found. Please install Claude Code first.'));
+      console.log(chalk.gray('Visit: https://docs.anthropic.com/en/docs/claude-code/quickstart'));
+      process.exit(1);
     }
     
-    // Use named pipe connection to central service
-    const pipePath = process.platform === 'win32' 
-      ? '\\\\.\\pipe\\camille-mcp'
-      : path.join(os.tmpdir(), 'camille-mcp.sock');
-      
-    const mcpConfig = {
-      mcpServers: {
-        camille: {
-          transport: "pipe",
-          pipeName: pipePath
-        }
-      }
-    };
+    // Build the command
+    const args = ['mcp', 'add'];
     
-    fs.writeFileSync(mcpPath, JSON.stringify(mcpConfig, null, 2));
-    console.log(chalk.green(`✅ Created .mcp.json in ${targetDir}`));
-    console.log(chalk.gray('\nCamille will use the API key from ~/.camille/config.json'));
+    // Add scope
+    const scope = options?.scope || 'local';
+    args.push('--scope', scope);
+    
+    // Add environment variable if API key is configured
+    const config = new ConfigManager();
+    const apiKey = config.getConfig().openaiApiKey;
+    if (apiKey) {
+      args.push('-e', `OPENAI_API_KEY=${apiKey}`);
+    }
+    
+    // Add server name and command
+    args.push('camille', '--', 'camille', 'server', 'start', '--mcp');
+    
+    try {
+      console.log(chalk.gray(`Adding Camille MCP server at ${scope} level...`));
+      
+      // For local scope, run in the target directory
+      const execOptions = scope === 'local' ? { cwd: targetDir, stdio: 'inherit' } : { stdio: 'inherit' };
+      execSync(`claude ${args.join(' ')}`, execOptions);
+      
+      console.log(chalk.green(`✅ Added Camille MCP server`));
+      if (scope === 'local') {
+        console.log(chalk.gray(`Location: ${targetDir}`));
+      }
+      console.log(chalk.gray(`Scope: ${scope}`));
+      
+      if (!apiKey) {
+        console.log(chalk.yellow('\n⚠ No OpenAI API key configured. Run "camille config set" to add one.'));
+      }
+    } catch (error) {
+      console.error(chalk.red('Failed to add MCP server:'));
+      console.error(chalk.gray((error as Error).message));
+      process.exit(1);
+    }
   });
 
 /**

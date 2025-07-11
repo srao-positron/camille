@@ -340,64 +340,85 @@ export class CamilleMCPServer {
    * Starts the MCP server
    */
   public async start(): Promise<void> {
-    // Clean up any existing socket
-    if (process.platform !== 'win32' && fs.existsSync(this.pipePath)) {
-      fs.unlinkSync(this.pipePath);
-    }
-
-    // Create named pipe server
-    this.pipeServer = net.createServer((socket) => {
-      logger.info('MCP client connected');
+    // When --mcp flag is used, run in stdio mode for Claude Code
+    logger.info('Starting MCP server in stdio mode');
+    
+    // Set up stdio transport
+    const transport = {
+      async readMessage(): Promise<any> {
+        return new Promise((resolve, reject) => {
+          let buffer = '';
+          
+          const onData = (chunk: Buffer) => {
+            buffer += chunk.toString();
+            const lines = buffer.split('\n');
+            
+            // Process complete lines
+            while (lines.length > 1) {
+              const line = lines.shift()!;
+              if (line.trim()) {
+                try {
+                  const message = JSON.parse(line);
+                  process.stdin.off('data', onData);
+                  resolve(message);
+                  return;
+                } catch (error) {
+                  // Invalid JSON, continue reading
+                }
+              }
+            }
+            
+            // Keep the last incomplete line in buffer
+            buffer = lines[0];
+          };
+          
+          process.stdin.on('data', onData);
+        });
+      },
       
-      socket.on('data', async (data) => {
-        try {
-          const message = JSON.parse(data.toString());
-          const response = await this.server.handleRequest(message);
-          socket.write(JSON.stringify(response) + '\n');
-        } catch (error) {
-          logger.error('MCP error', error);
-          const errorMessage = error instanceof Error ? error.message : String(error);
-          socket.write(JSON.stringify({ error: errorMessage }) + '\n');
+      async writeMessage(message: any): Promise<void> {
+        process.stdout.write(JSON.stringify(message) + '\n');
+      }
+    };
+    
+    // Handle messages in a loop
+    while (true) {
+      try {
+        const message = await transport.readMessage();
+        const response = await this.server.handleRequest(message);
+        await transport.writeMessage(response);
+      } catch (error) {
+        if (error instanceof Error && error.message.includes('EOF')) {
+          // Normal termination
+          break;
         }
-      });
-
-      socket.on('end', () => {
-        logger.info('MCP client disconnected');
-      });
-    });
-
-    await new Promise<void>((resolve, reject) => {
-      this.pipeServer!.listen(this.pipePath, (error?: Error) => {
-        if (error) {
-          reject(error);
-        } else {
-          logger.info(`MCP server listening on: ${this.pipePath}`);
-          resolve();
-        }
-      });
-    });
+        logger.error('MCP error', error);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        await transport.writeMessage({ error: errorMessage });
+      }
+    }
   }
 
   /**
    * Stops the MCP server
    */
   public async stop(): Promise<void> {
-    if (this.pipeServer) {
-      await new Promise<void>((resolve) => {
-        this.pipeServer!.close(() => resolve());
-      });
-      
-      // Clean up socket file on Unix
-      if (process.platform !== 'win32' && fs.existsSync(this.pipePath)) {
-        fs.unlinkSync(this.pipePath);
-      }
-    }
+    // In stdio mode, there's nothing to clean up
+    logger.info('MCP server stopped');
   }
 
   /**
-   * Gets the pipe path for client configuration
+   * Gets the pipe path for client configuration (deprecated)
    */
   public getPipePath(): string {
     return this.pipePath;
+  }
+  
+  /**
+   * Runs the MCP server as a standalone stdio process
+   */
+  public static async runStandalone(): Promise<void> {
+    const server = new CamilleMCPServer();
+    await server.start();
   }
 }

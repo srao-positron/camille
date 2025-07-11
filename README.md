@@ -50,52 +50,46 @@ camille set-key YOUR_OPENAI_API_KEY
 ```
 
 ### 2. Configure Claude Code hooks
-Add this to your Claude Code settings:
+Add this to your Claude Code settings at `~/.claude/settings.json`:
 ```json
 {
   "hooks": {
-    "preToolUse": [
+    "PreToolUse": [
       {
-        "command": "camille hook",
-        "matchers": {
-          "tools": ["Edit", "MultiEdit", "Write"]
-        }
+        "matcher": "Edit|MultiEdit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "camille hook"
+          }
+        ]
       }
     ]
   }
 }
 ```
 
-### 3. Configure MCP Server in Claude Code (for search functionality)
+### 3. Add as MCP Server in Claude Code (for search functionality)
 
-Create a `.mcp.json` file in your project root:
+Add Camille to Claude Code using the CLI:
 
-```json
-{
-  "mcpServers": {
-    "camille": {
-      "command": "camille",
-      "args": ["server", "start", "--mcp"]
-    }
-  }
-}
+```bash
+# Add at user level (available in all projects)
+claude mcp add --scope user camille -- camille server start --mcp
+
+# Add at project level (shared with team)
+claude mcp add --scope project camille -- camille server start --mcp
+
+# Add locally for current project only
+claude mcp add camille -- camille server start --mcp
 ```
 
-Or if you want to watch a specific directory:
-```json
-{
-  "mcpServers": {
-    "camille": {
-      "command": "camille",
-      "args": ["server", "start", "--mcp", "-d", "/path/to/project"]
-    }
-  }
-}
+Or use the built-in helper command:
+```bash
+camille init-mcp
 ```
 
-Quick setup: Use `camille init-mcp` to create this file automatically.
-
-The MCP server will start automatically when you open the project in Claude Code.
+The MCP server will start automatically when Claude Code needs it.
 
 ### 4. Start the server manually (alternative to MCP)
 If you prefer to run the server standalone:
@@ -158,44 +152,58 @@ Each directory is indexed separately, and searches will include results from all
 
 ### MCP (Model Context Protocol) Integration
 
-Camille can run as an MCP server, providing powerful code search and validation tools directly to Claude. This allows Claude to search your codebase semantically and validate changes before applying them.
+Camille integrates with Claude Code as an MCP server, providing powerful code search and validation tools directly to Claude. This allows Claude to search your codebase semantically and validate changes before applying them.
+
+#### Architecture
+
+Camille uses a centralized service architecture with named pipes:
+
+1. **Central Service**: The main Camille server (`camille server start`) runs as a single instance that:
+   - Indexes all configured directories
+   - Maintains embeddings in memory with optional disk caching
+   - Listens on a named pipe (`/tmp/camille-mcp.sock` on Unix, `\\.\pipe\camille-mcp` on Windows)
+
+2. **MCP Proxy**: When Claude Code needs to communicate with Camille, it spawns a lightweight Python proxy (`mcp-pipe-proxy.py`) that:
+   - Receives MCP requests from Claude Code via stdio
+   - Forwards them to the central service via named pipe
+   - Returns responses back to Claude Code
+
+This architecture ensures:
+- Only one indexing service runs regardless of how many Claude Code sessions are active
+- All sessions share the same pre-built index for instant searches
+- No duplicate indexing or resource waste
+- Fast response times since the index is already in memory
+
+#### Named Pipe Protocol
+
+The named pipe uses a simple line-based JSON protocol:
+
+```python
+# Send request
+{"jsonrpc": "2.0", "method": "tools/call", "params": {...}, "id": 1}
+
+# Receive response  
+{"jsonrpc": "2.0", "result": {...}, "id": 1}
+```
+
+You can create custom MCP proxies by connecting to the named pipe. See `mcp-pipe-proxy.py` for a reference implementation.
 
 #### Setting up MCP for Claude Code
 
-1. **Create a `.mcp.json` file in your project root:**
-   ```json
-   {
-     "mcpServers": {
-       "camille": {
-         "command": "camille",
-         "args": ["server", "start", "--mcp"]
-       }
-     }
-   }
-   ```
+The setup wizard configures MCP automatically, but you can also set it up manually:
 
-2. **Or use the quick setup command:**
-   ```bash
-   # Create .mcp.json in current directory
-   camille init-mcp
-   
-   # Create .mcp.json in specific directory
-   camille init-mcp ~/my-project
-   ```
+```bash
+# Add at user level (available in all projects)
+claude mcp add --scope user camille -- python3 /path/to/mcp-pipe-proxy.py
 
-3. **For multiple directories:**
-   ```json
-   {
-     "mcpServers": {
-       "camille": {
-         "command": "camille",
-         "args": ["server", "start", "--mcp", "-d", "/path/to/project1", "-d", "/path/to/project2"]
-       }
-     }
-   }
-   ```
+# Add at project level (shared with team)
+claude mcp add --scope project camille -- python3 /path/to/mcp-pipe-proxy.py
 
-The MCP server will start automatically when you open the project in Claude Code.
+# Add locally for current project only
+claude mcp add camille -- python3 /path/to/mcp-pipe-proxy.py
+```
+
+The MCP proxy will connect to your running Camille server automatically.
 
 #### Available MCP Tools
 

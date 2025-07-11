@@ -21,86 +21,105 @@ Before setting up MCP:
 
 2. Configure your OpenAI API key:
    ```bash
-   camille set-key YOUR_OPENAI_API_KEY
+   camille config set
    ```
 
 3. Ensure Claude Code is installed and up to date
 
-## How It Works
+## Quick Setup
 
-Camille uses a centralized architecture:
-
-1. **One Central Server**: A single Camille server runs as a system service
-2. **Named Pipe Communication**: Projects connect via a named pipe, not spawning new servers
-3. **Shared Resources**: All projects share the same indexed codebase and server resources
-4. **Efficient Operation**: No duplicate indexing or multiple server instances
-
-## Configuration
-
-### Step 1: Start the Central Camille Server
-
-First, ensure the central Camille server is running with MCP support:
+The easiest way to add Camille to Claude Code is using the setup wizard:
 
 ```bash
-camille server start --mcp
+camille setup
 ```
 
-This starts:
-- The main indexing and search server
-- The MCP named pipe server at `/tmp/camille-mcp.sock` (or `\\.\pipe\camille-mcp` on Windows)
+The wizard will:
+1. Configure your OpenAI API key
+2. Set up directories to watch
+3. Add Camille to Claude Code using the `claude mcp add` command
+4. Start the Camille server automatically
 
-### Step 2: Create .mcp.json in Your Project
+## Manual Setup
 
-Create a `.mcp.json` file in your project root directory:
+### Option 1: Using the CLI (Recommended)
 
-```json
-{
-  "mcpServers": {
-    "camille": {
-      "transport": "pipe",
-      "pipeName": "/tmp/camille-mcp.sock"
-    }
-  }
-}
-```
-
-On Windows, use:
-```json
-{
-  "mcpServers": {
-    "camille": {
-      "transport": "pipe",
-      "pipeName": "\\\\.\\pipe\\camille-mcp"
-    }
-  }
-}
-```
-
-### Step 3: Quick Setup Alternative
-
-Use the built-in command to create the .mcp.json file:
+Add Camille to Claude Code using the command line:
 
 ```bash
-# In your project directory
+# Add at user level (available in all projects)
+claude mcp add --scope user camille -- camille server start --mcp
+
+# Add at project level (shared with team via .mcp.json)
+claude mcp add --scope project camille -- camille server start --mcp
+
+# Add locally for specific project only
+cd /path/to/project
+claude mcp add --scope local camille -- camille server start --mcp
+```
+
+### Option 2: Using init-mcp Command
+
+Use the built-in command to add Camille to Claude Code:
+
+```bash
+# Add to current directory (local scope)
 camille init-mcp
 
-# Or specify a directory
+# Add to specific directory
 camille init-mcp ~/my-project
+
+# Add at user or project level
+camille init-mcp --scope user
+camille init-mcp --scope project
 ```
 
-### Step 4: Open Project in Claude Code
+### Option 3: Manual Configuration
 
-When you open the project in Claude Code, it will connect to the central Camille service via the named pipe.
+If you prefer manual configuration, Claude Code discovers MCP servers from `.mcp.json` files:
 
-## Verifying the Setup
+```json
+{
+  "mcpServers": {
+    "camille": {
+      "command": "camille",
+      "args": ["server", "start", "--mcp"],
+      "env": {
+        "OPENAI_API_KEY": "${OPENAI_API_KEY}"
+      }
+    }
+  }
+}
+```
 
-1. In Claude Code, you can verify Camille is connected by asking:
-   - "What MCP tools are available?"
-   - "Check Camille server status"
+## How It Works
 
-2. Claude should respond with information about the available Camille tools.
+When Claude Code starts Camille:
 
-3. Check the Camille logs at `/tmp/camille.log` for any issues.
+1. **Spawns Process**: Claude Code runs `camille server start --mcp`
+2. **Stdio Communication**: Communication happens via standard input/output
+3. **Background Indexing**: The server indexes your codebase in the background
+4. **Real-time Search**: Claude can search and validate code immediately
+
+## Configuration Scopes
+
+### User Scope
+- Configuration stored in Claude Code user settings
+- Available across all your projects
+- Not shared with team members
+- Use: `claude mcp add --scope user`
+
+### Project Scope
+- Configuration stored in `.mcp.json` in project root
+- Shared with all team members via version control
+- Anyone opening the project gets the MCP server
+- Use: `claude mcp add --scope project`
+
+### Local Scope
+- Configuration stored in Claude Code workspace settings
+- Only available in the specific project for you
+- Not shared with others
+- Use: `claude mcp add --scope local` (default)
 
 ## Using Camille Tools in Claude Code
 
@@ -152,83 +171,96 @@ Gets the current status of the Camille server.
 - Number of indexed files
 - Queue size
 
-## Project vs User Scope
+## Verifying the Setup
 
-By default, `.mcp.json` files are project-scoped and can be committed to version control to share with your team. If you need user-specific configuration, you can add `"scope": "user"` to the configuration.
+1. Check if Camille is listed in Claude Code:
+   ```bash
+   claude mcp list
+   ```
+
+2. In Claude Code, verify Camille is connected by asking:
+   - "What MCP tools are available?"
+   - "Check Camille server status"
+
+3. Claude should respond with information about the available Camille tools.
+
+## Managing MCP Servers
+
+### List all MCP servers
+```bash
+claude mcp list
+```
+
+### Get details about Camille
+```bash
+claude mcp get camille
+```
+
+### Remove Camille
+```bash
+claude mcp remove camille
+```
 
 ## Troubleshooting
 
 ### Camille doesn't appear in Claude Code
 
-1. **Check .mcp.json syntax** - Ensure valid JSON
-2. **Verify Camille is installed globally** - Run `which camille`
-3. **Check API key configuration** - Run `camille config show`
-4. **Look for error messages** in `/tmp/camille.log`
+1. **Verify installation** - Run `which camille` to ensure it's installed
+2. **Check Claude Code CLI** - Run `claude --version` to ensure it's installed
+3. **List MCP servers** - Run `claude mcp list` to see if Camille is registered
+4. **Check configuration** - Run `camille config show` to verify API key
 
 ### "Server not running" errors
 
-1. **Manual test** - Try running `camille server start --mcp` manually
+1. **Start manually** - Try running `camille server start` in a separate terminal
 2. **Check API key** - Ensure your OpenAI API key is configured: `camille config show`
-3. **Verify directory permissions** - Camille needs read access to watched directories
+3. **Check logs** - Look for errors in the console output
 
 ### Index not building
 
 1. **Check ignore patterns** - Run `camille config show` to see ignored files
 2. **Verify directory contents** - Ensure directories contain supported file types
-3. **Monitor logs** - Check `/tmp/camille.log` for indexing errors
+3. **Monitor server output** - Look for indexing progress messages
 4. **Check file size limits** - Very large files may be skipped
 
 ## Advanced Configuration
 
-### Quiet Mode for Background Operation
+### Environment Variables
 
-If running as a service or in the background, use quiet mode:
+You can pass environment variables to the MCP server:
 
-```json
-{
-  "mcpServers": {
-    "camille": {
-      "command": "camille",
-      "args": ["server", "start", "--mcp", "--quiet"]
-    }
-  }
-}
+```bash
+claude mcp add -e OPENAI_API_KEY=sk-... camille -- camille server start --mcp
 ```
 
-### Custom Configuration Directory
+### Custom Arguments
 
-You can specify a custom config directory:
+Add custom arguments to the server command:
 
-```json
-{
-  "mcpServers": {
-    "camille": {
-      "command": "camille",
-      "args": ["server", "start", "--mcp"],
-      "env": {
-        "CAMILLE_CONFIG_DIR": "/custom/config/path"
-      }
-    }
-  }
-}
+```bash
+# Start with specific directories
+claude mcp add camille -- camille server start --mcp -d /path/to/project
+
+# Start in quiet mode
+claude mcp add camille -- camille server start --mcp --quiet
 ```
 
 ## Security Considerations
 
 1. **API Key Storage**: Your OpenAI API key is stored securely in `~/.camille/config.json`
 2. **Directory Access**: Only grant Camille access to directories you want indexed
-3. **Network Security**: MCP communication happens over local named pipes, not network sockets
+3. **Process Isolation**: Each MCP server runs as a separate process
 4. **Code Privacy**: Remember that code is sent to OpenAI for embedding generation
 
 ## Performance Tips
 
 1. **File Size Limits**: Configure `maxFileSize` and `maxIndexFileSize` in your config
 2. **Ignore Patterns**: Add large generated files to ignore patterns
-3. **Multiple Directories**: Each directory is indexed independently for better performance
+3. **Directory Selection**: Only watch directories that need indexing
 
 ## Getting Help
 
-- Check logs at `/tmp/camille.log`
 - Run `camille --help` for command options
+- Run `claude mcp --help` for MCP management options
 - Visit the [GitHub repository](https://github.com/srao-positron/camille) for issues
-- Run `camille config show` to see current configuration
+- Check your configuration with `camille config show`

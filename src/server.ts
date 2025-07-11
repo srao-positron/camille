@@ -7,13 +7,14 @@ import * as chokidar from 'chokidar';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
+import * as net from 'net';
 import { glob } from 'glob';
 import PQueue from 'p-queue';
 import ora from 'ora';
 import chalk from 'chalk';
 import { ConfigManager } from './config';
 import { OpenAIClient } from './openai-client';
-import { EmbeddingsIndex, FileFilter } from './embeddings';
+import { EmbeddingsIndex, FileFilter, SearchResult } from './embeddings';
 import { EMBEDDING_PROMPT } from './prompts';
 import { consoleOutput, isQuietMode } from './utils/console';
 import { logger } from './logger';
@@ -44,6 +45,8 @@ export class CamilleServer {
   private spinner?: any;
   private configWatcher?: chokidar.FSWatcher;
   private lastConfigContent?: string;
+  private pipeServer?: any;
+  private pipePath: string;
 
   constructor() {
     this.configManager = new ConfigManager();
@@ -68,6 +71,11 @@ export class CamilleServer {
       queueSize: 0,
       watchedDirectories: []
     };
+    
+    // Set up named pipe path
+    this.pipePath = process.platform === 'win32' 
+      ? '\\\\.\\pipe\\camille-mcp'
+      : path.join(os.tmpdir(), 'camille-mcp.sock');
   }
 
   /**
@@ -103,6 +111,10 @@ export class CamilleServer {
     
     consoleOutput.success('✅ Camille server is running and index is ready');
     consoleOutput.info(chalk.gray(`Indexed files: ${this.embeddingsIndex.getIndexSize()}`));
+    
+    // Start the named pipe server for MCP communication
+    await this.startPipeServer();
+    
     logger.logServerEvent('server_started', { 
       directories: this.getWatchedDirectories(),
       indexSize: this.embeddingsIndex.getIndexSize() 
@@ -210,6 +222,17 @@ export class CamilleServer {
       this.configWatcher = undefined;
     }
     
+    // Close pipe server
+    if (this.pipeServer) {
+      this.pipeServer.close();
+      this.pipeServer = undefined;
+      
+      // Remove the pipe file
+      if (fs.existsSync(this.pipePath)) {
+        fs.unlinkSync(this.pipePath);
+      }
+    }
+    
     await this.indexQueue.onIdle();
     
     consoleOutput.success('✅ Camille server stopped');
@@ -233,6 +256,232 @@ export class CamilleServer {
    */
   public getEmbeddingsIndex(): EmbeddingsIndex {
     return this.embeddingsIndex;
+  }
+
+  /**
+   * Starts the named pipe server for MCP communication
+   */
+  private async startPipeServer(): Promise<void> {
+    // Remove existing pipe if it exists
+    if (fs.existsSync(this.pipePath)) {
+      fs.unlinkSync(this.pipePath);
+    }
+
+    // Create the named pipe server
+    this.pipeServer = net.createServer((socket) => {
+      logger.info('MCP client connected via named pipe');
+      
+      let buffer = '';
+      
+      socket.on('data', async (data) => {
+        buffer += data.toString();
+        const lines = buffer.split('\n');
+        
+        // Process complete lines
+        while (lines.length > 1) {
+          const line = lines.shift()!;
+          if (line.trim()) {
+            try {
+              const request = JSON.parse(line);
+              const response = await this.handleMCPRequest(request);
+              socket.write(JSON.stringify(response) + '\n');
+            } catch (error) {
+              logger.error('Error handling MCP request', error);
+              const errorResponse = {
+                jsonrpc: '2.0',
+                error: {
+                  code: -32603,
+                  message: error instanceof Error ? error.message : 'Unknown error'
+                },
+                id: null
+              };
+              socket.write(JSON.stringify(errorResponse) + '\n');
+            }
+          }
+        }
+        
+        // Keep the last incomplete line in buffer
+        buffer = lines[0];
+      });
+      
+      socket.on('error', (error: Error) => {
+        logger.error('Named pipe socket error', error);
+      });
+      
+      socket.on('close', () => {
+        logger.info('MCP client disconnected');
+      });
+    });
+
+    // Listen on the named pipe
+    this.pipeServer.listen(this.pipePath, () => {
+      consoleOutput.info(chalk.gray(`MCP pipe server listening on: ${this.pipePath}`));
+      logger.info('Named pipe server started', { pipePath: this.pipePath });
+    });
+
+    this.pipeServer.on('error', (error: Error) => {
+      logger.error('Named pipe server error', error);
+      consoleOutput.error(`Failed to start pipe server: ${error}`);
+    });
+  }
+
+  /**
+   * Handles MCP requests received via named pipe
+   */
+  private async handleMCPRequest(request: any): Promise<any> {
+    logger.debug('Handling MCP request', { method: request.method });
+    
+    // Import MCP handlers
+    const { CamilleMCPServer } = require('./mcp-server');
+    const mcpServer = new CamilleMCPServer();
+    
+    // Route the request to appropriate handler
+    if (request.method === 'tools/list') {
+      return mcpServer['server'].handleRequest(request);
+    } else if (request.method === 'tools/call') {
+      const { name, arguments: args } = request.params;
+      
+      switch (name) {
+        case 'camille_search_code':
+          // Use our local embeddings index
+          return await this.handleSearchCode(args);
+          
+        case 'camille_validate_changes':
+          // Forward to hook for validation
+          const { CamilleHook } = require('./hook');
+          const hook = new CamilleHook();
+          return await this.handleValidateChanges(args, hook);
+          
+        case 'camille_status':
+          return {
+            jsonrpc: '2.0',
+            result: {
+              running: true,
+              indexReady: this.embeddingsIndex.isIndexReady(),
+              indexing: this.status.isIndexing,
+              filesIndexed: this.embeddingsIndex.getIndexSize(),
+              queueSize: this.indexQueue.size
+            },
+            id: request.id
+          };
+          
+        default:
+          throw new Error(`Unknown tool: ${name}`);
+      }
+    }
+    
+    throw new Error(`Unknown method: ${request.method}`);
+  }
+
+  /**
+   * Handles code search requests
+   */
+  private async handleSearchCode(args: any): Promise<any> {
+    const { query, limit = 10 } = args;
+    
+    if (!this.embeddingsIndex.isIndexReady()) {
+      return {
+        jsonrpc: '2.0',
+        error: {
+          code: -32000,
+          message: 'Index is still building. Please wait for initial indexing to complete.'
+        }
+      };
+    }
+    
+    try {
+      const queryEmbedding = await this.openaiClient.generateEmbedding(query);
+      const results = this.embeddingsIndex.search(queryEmbedding, limit);
+      
+      return {
+        jsonrpc: '2.0',
+        result: {
+          results: results.map((result: SearchResult) => ({
+            path: path.relative(process.cwd(), result.path),
+            similarity: result.similarity.toFixed(3),
+            summary: result.summary || 'No summary available',
+            preview: result.content.substring(0, 200) + '...'
+          })),
+          totalFiles: this.embeddingsIndex.getIndexSize()
+        }
+      };
+    } catch (error) {
+      return {
+        jsonrpc: '2.0',
+        error: {
+          code: -32603,
+          message: `Search failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+        }
+      };
+    }
+  }
+
+  /**
+   * Handles validation requests
+   */
+  private async handleValidateChanges(args: any, hook: any): Promise<any> {
+    const { filePath, changes, changeType } = args;
+    
+    try {
+      const mockInput = {
+        session_id: 'mcp-validation',
+        transcript_path: '',
+        hook_event_name: 'PreToolUse',
+        tool: {
+          name: changeType === 'create' ? 'Write' : 'Edit',
+          input: {
+            file_path: filePath,
+            ...(changeType === 'create' 
+              ? { content: changes }
+              : { old_string: '', new_string: changes })
+          }
+        }
+      };
+
+      const result = await hook.processHook(mockInput);
+
+      return {
+        jsonrpc: '2.0',
+        result: {
+          approved: result.decision === 'approve',
+          reason: result.reason,
+          needsChanges: result.decision === 'block',
+          details: this.parseValidationDetails(result.reason || '')
+        }
+      };
+    } catch (error) {
+      return {
+        jsonrpc: '2.0',
+        error: {
+          code: -32603,
+          message: `Validation failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+        }
+      };
+    }
+  }
+
+  /**
+   * Parses validation details from reason string
+   */
+  private parseValidationDetails(reason: string): any {
+    const details = {
+      securityIssues: [] as string[],
+      complianceIssues: [] as string[],
+      qualityIssues: [] as string[]
+    };
+
+    const lines = reason.split('\n');
+    for (const line of lines) {
+      if (line.includes('Security:')) {
+        details.securityIssues.push(line.replace('Security:', '').trim());
+      } else if (line.includes('Compliance:')) {
+        details.complianceIssues.push(line.replace('Compliance:', '').trim());
+      } else if (line.includes('Quality:')) {
+        details.qualityIssues.push(line.replace('Quality:', '').trim());
+      }
+    }
+
+    return details;
   }
 
   /**

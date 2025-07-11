@@ -80,8 +80,8 @@ export class SetupWizard {
       // Test the setup
       await this.testSetup();
 
-      // Show success message
-      this.showSuccess();
+      // Show success message and start server
+      await this.showSuccess();
 
     } catch (error) {
       this.logger.error('Setup wizard failed', error);
@@ -503,16 +503,16 @@ export class SetupWizard {
       return { enabled: false };
     }
 
-    console.log(chalk.gray('\nMCP requires a .mcp.json file in each project where you want to use Camille.'));
-    console.log(chalk.gray('You can also add this file manually later.\n'));
+    console.log(chalk.gray('\nCamille can be added to Claude Code as an MCP server.'));
+    console.log(chalk.gray('You can configure it at user level (all projects) or project level.\n'));
 
     const { setupChoice } = await inquirer.prompt([{
       type: 'list',
       name: 'setupChoice',
       message: 'How would you like to set up MCP?',
       choices: [
-        { name: 'Create .mcp.json in specific projects', value: 'specific' },
-        { name: 'Show me how to add it manually later', value: 'manual' },
+        { name: 'Add to Claude Code now (recommended)', value: 'add' },
+        { name: 'Show me the manual command to run later', value: 'manual' },
         { name: 'Skip MCP setup for now', value: 'skip' }
       ]
     }]);
@@ -522,52 +522,64 @@ export class SetupWizard {
     }
 
     if (setupChoice === 'manual') {
-      console.log(chalk.yellow('\nTo enable MCP in a project, create a .mcp.json file:'));
-      console.log(chalk.gray(`{
-  "mcpServers": {
-    "camille": {
-      "command": "camille",
-      "args": ["server", "start", "--mcp"],
-      "env": {
-        "OPENAI_API_KEY": "\${OPENAI_API_KEY}"
-      }
-    }
-  }
-}`));
+      console.log(chalk.yellow('\nTo add Camille to Claude Code, run:'));
+      console.log(chalk.cyan('\nFor user-level (all projects):'));
+      console.log(chalk.gray('  claude mcp add --scope user camille -- camille server start --mcp'));
+      console.log(chalk.cyan('\nFor project-level (current project):'));
+      console.log(chalk.gray('  claude mcp add --scope project camille -- camille server start --mcp'));
+      console.log(chalk.cyan('\nFor specific projects:'));
+      console.log(chalk.gray('  cd /path/to/project'));
+      console.log(chalk.gray('  claude mcp add --scope local camille -- camille server start --mcp'));
       return { enabled: true, autoStart: false, manualSetup: true };
     }
 
-    // Let user select which projects to enable MCP in
-    const watchedDirs = this.configManager.getConfig().watchedDirectories || [];
-    const projectDirs: string[] = [];
-    
-    if (watchedDirs.length > 0) {
-      const { selectedProjects } = await inquirer.prompt([{
-        type: 'checkbox',
-        name: 'selectedProjects',
-        message: 'Select projects where you want to enable MCP:',
-        choices: watchedDirs.map(dir => ({
-          name: this.formatDirDisplay(dir),
-          value: dir,
-          checked: true
-        }))
-      }]);
-      projectDirs.push(...selectedProjects);
-    } else {
-      // No watched directories yet, ask for project paths
-      const { addProject } = await inquirer.prompt([{
-        type: 'confirm',
-        name: 'addProject',
-        message: 'Would you like to add .mcp.json to the current directory?',
-        default: true
-      }]);
+    // Ask for scope
+    const { scope } = await inquirer.prompt([{
+      type: 'list',
+      name: 'scope',
+      message: 'Where should Camille be available?',
+      choices: [
+        { name: 'User level - Available in all projects', value: 'user' },
+        { name: 'Project level - Available to all team members in current project', value: 'project' },
+        { name: 'Local - Just for me in specific projects', value: 'local' }
+      ]
+    }]);
+
+    if (scope === 'local') {
+      // Let user select which projects to enable MCP in
+      const watchedDirs = this.configManager.getConfig().watchedDirectories || [];
+      const projectDirs: string[] = [];
       
-      if (addProject) {
-        projectDirs.push(process.cwd());
+      if (watchedDirs.length > 0) {
+        const { selectedProjects } = await inquirer.prompt([{
+          type: 'checkbox',
+          name: 'selectedProjects',
+          message: 'Select projects where you want to enable MCP:',
+          choices: watchedDirs.map(dir => ({
+            name: this.formatDirDisplay(dir),
+            value: dir,
+            checked: true
+          }))
+        }]);
+        projectDirs.push(...selectedProjects);
+      } else {
+        // No watched directories yet, ask for current directory
+        const { addProject } = await inquirer.prompt([{
+          type: 'confirm',
+          name: 'addProject',
+          message: 'Would you like to add Camille to the current directory?',
+          default: true
+        }]);
+        
+        if (addProject) {
+          projectDirs.push(process.cwd());
+        }
       }
+      
+      return { enabled: true, autoStart: true, scope, projectDirs };
     }
 
-    return { enabled: true, autoStart: true, projectDirs };
+    return { enabled: true, autoStart: true, scope };
   }
 
   /**
@@ -714,20 +726,21 @@ export class SetupWizard {
    * Creates Claude Code settings file
    */
   private async createClaudeCodeSettings(hooksConfig: any, mcpConfig: any, spinner?: Ora): Promise<void> {
-    // Handle hooks configuration (still goes in .claude-code/settings.json)
+    // Handle hooks configuration in ~/.claude/settings.json
     if (hooksConfig.enabled) {
       let settings: any = {
         hooks: {
-          preToolUse: [{
-            command: 'camille hook',
-            matchers: {
-              tools: hooksConfig.tools
-            }
+          PreToolUse: [{
+            matcher: hooksConfig.tools.join('|'),
+            hooks: [{
+              type: 'command',
+              command: 'camille hook'
+            }]
           }]
         }
       };
 
-      const settingsPath = path.join(os.homedir(), '.claude-code', 'settings.json');
+      const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
       const settingsDir = path.dirname(settingsPath);
 
       if (!fs.existsSync(settingsDir)) {
@@ -742,7 +755,7 @@ export class SetupWizard {
           this.logger.info('Found existing Claude Code settings', { settingsPath });
           
           // Check if user already has hooks configured
-          if (existingSettings.hooks?.preToolUse && existingSettings.hooks.preToolUse.length > 0) {
+          if (existingSettings.hooks?.PreToolUse && existingSettings.hooks.PreToolUse.length > 0) {
             // Stop spinner to show prompt
             if (spinner) spinner.stop();
             
@@ -769,8 +782,8 @@ export class SetupWizard {
             
             if (mergeChoice === 'merge') {
               // Check if Camille hook already exists
-              const camilleHookExists = existingSettings.hooks.preToolUse.some((hook: any) => 
-                hook.command === 'camille hook'
+              const camilleHookExists = existingSettings.hooks.PreToolUse.some((hookConfig: any) => 
+                hookConfig.hooks?.some((hook: any) => hook.command === 'camille hook')
               );
               
               if (camilleHookExists) {
@@ -779,8 +792,14 @@ export class SetupWizard {
               }
               
               // Add Camille hook to existing hooks
-              existingSettings.hooks.preToolUse.push(settings.hooks.preToolUse[0]);
+              existingSettings.hooks.PreToolUse.push(settings.hooks.PreToolUse[0]);
               settings = existingSettings;
+            } else if (mergeChoice === 'replace') {
+              // Replace existing hooks with Camille hook, preserving other settings
+              settings = {
+                ...existingSettings,
+                hooks: settings.hooks
+              };
             }
           } else {
             // No existing hooks, safe to merge
@@ -805,69 +824,62 @@ export class SetupWizard {
       console.log(chalk.green(`✓ Updated Claude Code hooks configuration`));
     }
 
-    // Handle MCP configuration (goes in project root .mcp.json)
-    if (mcpConfig.enabled && !mcpConfig.manualSetup && mcpConfig.projectDirs) {
-      // Create .mcp.json in each selected project directory
-      for (const dir of mcpConfig.projectDirs) {
-        // Use named pipe connection to central service instead of spawning new server
-        const pipePath = process.platform === 'win32' 
-          ? '\\\\.\\pipe\\camille-mcp'
-          : path.join(os.tmpdir(), 'camille-mcp.sock');
-          
-        const mcpConfigData = {
-          mcpServers: {
-            camille: {
-              transport: "pipe",
-              pipeName: pipePath
-            }
-          }
-        };
+    // Handle MCP configuration using claude mcp add command
+    if (mcpConfig.enabled && !mcpConfig.manualSetup) {
+      const { execSync } = require('child_process');
+      
+      try {
+        // Check if claude command is available
+        execSync('claude --version', { stdio: 'ignore' });
+      } catch {
+        console.log(chalk.yellow('\n⚠ Claude Code CLI not found. Please install Claude Code first.'));
+        console.log(chalk.gray('Visit: https://docs.anthropic.com/en/docs/claude-code/quickstart'));
+        return;
+      }
 
-        const mcpPath = path.join(dir, '.mcp.json');
-        
-        // Check if file already exists
-        let existingMcpConfig = {};
-        if (fs.existsSync(mcpPath)) {
+      // Build the command arguments
+      const args = ['mcp', 'add'];
+      
+      // Add scope
+      if (mcpConfig.scope) {
+        args.push('--scope', mcpConfig.scope);
+      }
+      
+      // Add environment variable if API key is set
+      const config = this.configManager.getConfig();
+      if (config.openaiApiKey) {
+        args.push('-e', `OPENAI_API_KEY=${config.openaiApiKey}`);
+      }
+      
+      // Add server name and command to use the Python proxy
+      const proxyPath = path.join(__dirname, '..', 'mcp-pipe-proxy.py');
+      args.push('camille', '--', 'python3', proxyPath);
+      
+      if (mcpConfig.scope === 'local' && mcpConfig.projectDirs) {
+        // For local scope, we need to run the command in each project directory
+        for (const dir of mcpConfig.projectDirs) {
           try {
-            existingMcpConfig = JSON.parse(fs.readFileSync(mcpPath, 'utf8'));
-            this.logger.info('Found existing .mcp.json', { mcpPath });
-            
-            // Stop spinner to show prompt
-            if (spinner) spinner.stop();
-            
-            // Ask user if they want to overwrite
-            const { overwrite } = await inquirer.prompt([{
-              type: 'confirm',
-              name: 'overwrite',
-              message: `${chalk.yellow('⚠')} .mcp.json already exists in ${this.formatDirDisplay(dir)}. Update it?`,
-              default: true
-            }]);
-            
-            // Restart spinner after prompt
-            if (spinner) spinner.start('Applying configuration...');
-            
-            if (!overwrite) {
-              console.log(chalk.gray(`Skipped ${mcpPath}`));
-              continue;
-            }
-          } catch {
-            this.logger.warn('Failed to parse existing .mcp.json', { mcpPath });
+            console.log(chalk.gray(`\nAdding Camille to ${this.formatDirDisplay(dir)}...`));
+            execSync(`claude ${args.join(' ')}`, { 
+              cwd: dir,
+              stdio: 'inherit'
+            });
+            console.log(chalk.green(`✓ Added Camille MCP server to ${this.formatDirDisplay(dir)}`));
+          } catch (error) {
+            console.log(chalk.red(`✗ Failed to add MCP server to ${this.formatDirDisplay(dir)}:`));
+            console.log(chalk.gray((error as Error).message));
           }
         }
-
-        // Merge configurations
-        const mergedMcpConfig = {
-          ...existingMcpConfig,
-          mcpServers: {
-            ...(existingMcpConfig as any).mcpServers,
-            ...mcpConfigData.mcpServers
-          }
-        };
-
-        fs.writeFileSync(mcpPath, JSON.stringify(mergedMcpConfig, null, 2));
-        this.logger.info('Created/updated .mcp.json for MCP server', { mcpPath });
-        
-        console.log(chalk.green(`✓ Created .mcp.json in ${this.formatDirDisplay(dir)}`));
+      } else {
+        // For user or project scope, run once
+        try {
+          console.log(chalk.gray(`\nAdding Camille at ${mcpConfig.scope} level...`));
+          execSync(`claude ${args.join(' ')}`, { stdio: 'inherit' });
+          console.log(chalk.green(`\n✓ Added Camille MCP server at ${mcpConfig.scope} level`));
+        } catch (error) {
+          console.log(chalk.red('\n✗ Failed to add MCP server:'));
+          console.log(chalk.gray((error as Error).message));
+        }
       }
     }
   }
@@ -1011,10 +1023,38 @@ WantedBy=default.target`;
   }
 
   /**
-   * Shows success message
+   * Shows success message and starts the server
    */
-  private showSuccess(): void {
+  private async showSuccess(): Promise<void> {
     const config = this.configManager.getConfig();
+    
+    // Start the server in the background
+    if (config.watchedDirectories && config.watchedDirectories.length > 0) {
+      console.log(chalk.blue('\n🚀 Starting Camille server...\n'));
+      try {
+        // Use nohup to start the server truly detached
+        const { execSync } = require('child_process');
+        execSync('nohup camille server start --mcp > /dev/null 2>&1 &', {
+          shell: true
+        });
+        
+        // Give it a moment to start
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        // Check if it's running
+        try {
+          execSync('camille server status', { stdio: 'ignore' });
+          console.log(chalk.green('✓ Server started successfully\n'));
+          this.logger.info('Server started after setup');
+        } catch {
+          // Status command failed, server might not be running
+          console.log(chalk.yellow('⚠ Server may not have started. Start it manually with: camille server start\n'));
+        }
+      } catch (error) {
+        console.log(chalk.yellow('⚠ Could not start server automatically. Start it manually with: camille server start\n'));
+        this.logger.error('Failed to start server after setup', error);
+      }
+    }
     
     // Build success message based on what was configured
     let message = chalk.green('✅ Camille Setup Complete!\n\n');

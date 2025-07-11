@@ -33,6 +33,15 @@ try {
     fs.chmodSync(cliPath, '755');
   }
   
+  // Copy Python MCP proxy
+  const proxySource = path.join(__dirname, '..', 'mcp-pipe-proxy.py');
+  const proxyDest = path.join(distDir, 'mcp-pipe-proxy.py');
+  if (fs.existsSync(proxySource)) {
+    fs.copyFileSync(proxySource, proxyDest);
+    fs.chmodSync(proxyDest, '755');
+    console.log('Copied MCP proxy script');
+  }
+  
   console.log('\n✅ Build completed successfully!');
   
 } catch (error) {

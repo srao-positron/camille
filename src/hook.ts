@@ -6,6 +6,7 @@
 import { ConfigManager } from './config';
 import { OpenAIClient, ReviewResult } from './openai-client';
 import { SYSTEM_PROMPT, REVIEW_PROMPT_TEMPLATE, populateTemplate } from './prompts';
+import { logger } from './logger';
 import * as path from 'path';
 
 /**
@@ -51,27 +52,46 @@ export class CamilleHook {
    */
   async processHook(input: HookInput): Promise<HookOutput> {
     try {
+      logger.info('Hook called', { 
+        event: input.hook_event_name, 
+        tool: input.tool?.name,
+        hasInput: !!input.tool?.input 
+      });
+      
       // Only process PreToolUse events for code editing tools
       if (input.hook_event_name !== 'PreToolUse') {
+        logger.debug('Skipping non-PreToolUse event');
         return { continue: true };
       }
 
       const tool = input.tool;
       if (!tool || !this.isCodeEditingTool(tool.name)) {
+        logger.debug('Skipping non-code-editing tool', { toolName: tool?.name });
         return { continue: true };
       }
 
       // Extract code changes from the tool input
       const codeChanges = this.extractCodeChanges(tool);
       if (!codeChanges) {
+        logger.debug('No code changes extracted');
         return { continue: true };
       }
+
+      logger.info('Performing code review', { 
+        changesLength: codeChanges.length
+      });
 
       // Perform the review
       const review = await this.performReview(codeChanges);
 
       // Make decision based on review
-      return this.makeDecision(review);
+      const decision = this.makeDecision(review);
+      logger.info('Review decision', { 
+        decision: decision.decision,
+        continue: decision.continue 
+      });
+      
+      return decision;
 
     } catch (error) {
       // Fail fast as requested
