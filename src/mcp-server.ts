@@ -670,8 +670,20 @@ export class CamilleMCPServer {
     try {
       // Generate embedding for the query
       const config = this.configManager.getConfig();
-      const llmClient = new LLMClient(config, process.cwd());
       
+      // Ensure OpenAI API key is available for embeddings
+      if (!config.openaiApiKey) {
+        const errorMessage = 'OpenAI API key is required for code search. Please configure it using: camille config set openaiApiKey <key>';
+        return {
+          content: [{
+            type: 'text',
+            text: errorMessage
+          }],
+          error: errorMessage
+        };
+      }
+      
+      const llmClient = new LLMClient(config, process.cwd());
       const queryEmbedding = await llmClient.generateEmbedding(query);
       
       // Search the index
