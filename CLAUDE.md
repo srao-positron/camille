@@ -2,6 +2,8 @@
 
 This document contains specific instructions for Claude when working on the Camille codebase.
 
+**📋 IMPORTANT: Also read CAMILLE_DEVELOPMENT_RULES.md for detailed development standards and workflow requirements.**
+
 ## IMPORTANT: Memory System Usage
 
 When working on this codebase, you MUST use the memory tools to maintain continuity and learn from past discussions:
@@ -282,6 +284,17 @@ Camille now includes a comprehensive memory and knowledge system with three majo
 ```
 
 For detailed design specifications, see the `docs/memory-system/` directory.
+
+## Development Standards
+
+**For comprehensive development rules including:**
+- Memory-first development workflow
+- Consistent MCP tool response formats
+- Test-first requirements
+- Security and error handling patterns
+- Build and CI requirements
+
+**➡️ See CAMILLE_DEVELOPMENT_RULES.md**
 
 ## Dependencies
 
