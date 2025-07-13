@@ -1,11 +1,12 @@
 /**
  * Logger module for Camille
- * Provides detailed logging to /tmp/camille.log
+ * Provides detailed logging to ~/.camille/logs/camille.log
  */
 
 import winston from 'winston';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
 
 /**
  * Logger class with Winston integration
@@ -16,7 +17,10 @@ export class Logger {
 
   constructor() {
     // Ensure log directory exists
-    const logDir = '/tmp';
+    const logDir = path.join(os.homedir(), '.camille', 'logs');
+    if (!fs.existsSync(logDir)) {
+      fs.mkdirSync(logDir, { recursive: true });
+    }
     const logFile = path.join(logDir, 'camille.log');
     const errorLogFile = path.join(logDir, 'camille.error.log');
 

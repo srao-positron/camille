@@ -7,6 +7,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { config as dotenvConfig } from 'dotenv';
+import { MemoryConfig, DEFAULT_MEMORY_CONFIG } from './memory/types.js';
 
 /**
  * Interface for Camille configuration options
@@ -49,6 +50,7 @@ export interface CamilleConfig {
     platform?: string;
     method?: string;
   };
+  memory?: MemoryConfig; // Memory system configuration
 }
 
 /**
@@ -74,7 +76,8 @@ const DEFAULT_CONFIG: CamilleConfig = {
     '*.log',
     '*.tmp',
     '.DS_Store'
-  ]
+  ],
+  memory: DEFAULT_MEMORY_CONFIG
 };
 
 /**

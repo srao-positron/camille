@@ -10,6 +10,8 @@ import { SearchResult } from './embeddings';
 import { LLMClient } from './llm-client';
 import { ConfigManager } from './config';
 import { logger } from './logger';
+import { UnifiedSearch } from './memory/search/unified-search';
+import { LanceVectorDB } from './memory/databases/lance-db';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as net from 'net';
@@ -404,6 +406,126 @@ async function checkCamilleHealth() {
       type: 'object',
       properties: {}
     }
+  },
+
+  /**
+   * Recall previous discussions from conversation memory
+   */
+  recallMemory: {
+    name: 'recall_previous_discussions',
+    description: `🧠 ESSENTIAL TOOL: Search through our entire conversation history across all projects.
+This tool helps maintain continuity across sessions and prevents repeating work.
+YOU SHOULD USE THIS TOOL FREQUENTLY to understand context and past decisions.
+
+## Overview
+This tool searches through indexed conversation transcripts to find relevant discussions
+from our past interactions. It uses semantic search to find conceptually similar conversations,
+not just keyword matches.
+
+## When to Use This Tool (USE PROACTIVELY!)
+1. **ALWAYS when starting a new task** - Search for related work first
+2. **When the user references past work** - "we discussed", "remember when", "last time"
+3. **Before implementing features** - Check if similar work exists
+4. **When debugging** - Search for similar errors or issues
+5. **For context on any module** - Understand past decisions and implementations
+6. **When user asks about progress** - Find what was previously done
+
+⚠️ IMPORTANT: Use this tool BEFORE making assumptions about the codebase!
+
+## Search Capabilities
+- **Semantic understanding** - Finds conceptually related discussions
+- **Time filtering** - Search within specific time ranges
+- **Project filtering** - Limit to specific projects
+- **Context preservation** - Shows surrounding conversation for clarity
+
+## Example Queries
+1. "authentication error we fixed last week"
+2. "database migration approach we discussed"
+3. "TypeScript configuration issues"
+4. "deployment strategy for production"
+5. "performance optimization techniques we tried"
+
+## Response Format
+Results include:
+- Relevant conversation excerpts
+- Session and project context
+- Timestamps for reference
+- Topics discussed
+- Relevance scores
+- Chunk IDs for full retrieval
+
+Pro tip: The more specific your query, the better the results. Include project names,
+error messages, or specific technical terms when possible. Use retrieve_memory_chunk to get full context.`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'What you want to remember or find from our past conversations'
+        },
+        project_filter: {
+          type: 'string',
+          description: 'Optional: limit search to a specific project path'
+        },
+        time_range: {
+          type: 'string',
+          enum: ['today', 'week', 'month', 'all'],
+          description: 'Optional: limit search to a specific time period',
+          default: 'all'
+        },
+        limit: {
+          type: 'number',
+          description: 'Maximum number of results to return',
+          default: 10
+        }
+      },
+      required: ['query']
+    }
+  },
+
+  /**
+   * Retrieve full memory chunk by ID
+   */
+  retrieveChunk: {
+    name: 'retrieve_memory_chunk',
+    description: `Retrieve the full content of a memory chunk by its ID.
+
+## Overview
+This tool fetches the complete conversation chunk that was found during a memory search.
+Use this when you need to see the full context of a conversation, not just the excerpt.
+
+## When to Use This Tool
+1. **After searching** - When recall_previous_discussions returns a chunk ID
+2. **Deep context** - When you need to understand the full conversation flow
+3. **Code review** - To see all the code and discussions in a chunk
+4. **Problem solving** - To understand how a complex issue was resolved
+
+## Response Format
+Returns the complete chunk with:
+- Full conversation text
+- All messages in the chunk
+- Complete metadata
+- Navigation to adjacent chunks
+- Timestamp range covered
+
+## Example Usage
+After searching and finding chunk "session123-chunk-5", retrieve it:
+retrieve_memory_chunk(chunk_id: "session123-chunk-5")`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        chunk_id: {
+          type: 'string',
+          description: 'The ID of the chunk to retrieve (from search results)'
+        },
+        include_adjacent: {
+          type: 'boolean',
+          description: 'Include summaries of previous and next chunks',
+          default: false
+        }
+      },
+      required: ['chunk_id']
+    }
   }
 };
 
@@ -418,6 +540,11 @@ export class CamilleMCPServer {
 
   constructor() {
     this.configManager = new ConfigManager();
+    logger.info('MCP Server initializing with tools', {
+      toolCount: Object.keys(TOOLS).length,
+      toolNames: Object.values(TOOLS).map((t: any) => t.name),
+      toolKeys: Object.keys(TOOLS)
+    });
     this.server = new MCPServerWrapper({
       name: 'camille',
       version: '0.1.0',
@@ -436,10 +563,54 @@ export class CamilleMCPServer {
    * Sets up MCP handlers
    */
   private setupHandlers(): void {
+    logger.info('setupHandlers called');
+    
     // List available tools
-    this.server.setRequestHandler('tools/list', async () => ({
-      tools: Object.values(TOOLS)
-    }));
+    this.server.setRequestHandler('tools/list', async () => {
+      logger.info('tools/list handler START');
+      
+      // Debug TOOLS at runtime
+      logger.info('TOOLS object debug', {
+        type: typeof TOOLS,
+        keys: Object.keys(TOOLS),
+        keysLength: Object.keys(TOOLS).length
+      });
+
+      console.log('TOOLS object debug', {
+        type: typeof TOOLS,
+        keys: Object.keys(TOOLS),
+        keysLength: Object.keys(TOOLS).length
+      });
+      
+      const tools = Object.values(TOOLS);
+      logger.info('After Object.values()', {
+        toolsLength: tools.length,
+        toolsIsArray: Array.isArray(tools),
+        firstToolName: tools[0]?.name,
+        lastToolName: tools[tools.length - 1]?.name
+      });
+      
+      // Log each tool
+      tools.forEach((tool: any, index: number) => {
+        logger.info(`Tool ${index}`, {
+          name: tool.name,
+          hasDescription: !!tool.description,
+          descLength: tool.description?.length
+        });
+      });
+      
+      const response = {
+        tools: tools
+      };
+      
+      logger.info('tools/list handler END', { 
+        returning: tools.length,
+        responseKeys: Object.keys(response),
+        responseToolsLength: response.tools.length
+      });
+      
+      return response;
+    });
 
     // Handle tool calls
     this.server.setRequestHandler('tools/call', async (request: any) => {
@@ -452,6 +623,10 @@ export class CamilleMCPServer {
           return await this.handleValidateChanges(args);
         case 'server_status':
           return await this.handleGetStatus(args);
+        case 'recall_previous_discussions':
+          return await this.handleRecallMemory(args);
+        case 'retrieve_memory_chunk':
+          return await this.handleRetrieveChunk(args);
         default:
           throw new Error(`Unknown tool: ${name}`);
       }
@@ -467,16 +642,26 @@ export class CamilleMCPServer {
     // Check if server is running
     const server = ServerManager.getInstance();
     if (!server) {
+      const errorMessage = 'Camille server is not running. Start it with "camille server start"';
       return {
-        error: 'Camille server is not running. Start it with "camille server start"'
+        content: [{
+          type: 'text',
+          text: errorMessage
+        }],
+        error: errorMessage
       };
     }
 
     const embeddingsIndex = server.getEmbeddingsIndex();
     if (!embeddingsIndex.isIndexReady()) {
       logger.info('Search attempted while index not ready');
+      const indexingMessage = 'Index is still building. Please wait for initial indexing to complete.';
       return {
-        error: 'Index is still building. Please wait for initial indexing to complete.',
+        content: [{
+          type: 'text',
+          text: indexingMessage
+        }],
+        error: indexingMessage,
         status: 'indexing',
         hint: 'The server is currently indexing files. This usually takes a few seconds depending on the project size.'
       };
@@ -508,14 +693,23 @@ export class CamilleMCPServer {
       }
 
       return {
+        content: [{
+          type: 'text',
+          text: textSummary.trim()
+        }],
         results: formattedResults,
         totalFiles: embeddingsIndex.getIndexSize(),
         summary: textSummary.trim()
       };
 
     } catch (error) {
+      const errorMessage = `Search failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
       return {
-        error: `Search failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+        content: [{
+          type: 'text',
+          text: errorMessage
+        }],
+        error: errorMessage
       };
     }
   }
@@ -582,6 +776,10 @@ export class CamilleMCPServer {
       }
 
       return {
+        content: [{
+          type: 'text',
+          text: textSummary.trim()
+        }],
         approved,
         reason: result.reason,
         needsChanges: result.decision === 'block',
@@ -590,8 +788,13 @@ export class CamilleMCPServer {
       };
 
     } catch (error) {
+      const errorMessage = `Validation failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
       return {
-        error: `Validation failed: ${error instanceof Error ? error.message : 'Unknown error'}`
+        content: [{
+          type: 'text',
+          text: errorMessage
+        }],
+        error: errorMessage
       };
     }
   }
@@ -603,9 +806,14 @@ export class CamilleMCPServer {
     const server = ServerManager.getInstance();
     
     if (!server) {
+      const notRunningMessage = 'Camille server is not running';
       return {
+        content: [{
+          type: 'text',
+          text: notRunningMessage
+        }],
         running: false,
-        message: 'Camille server is not running'
+        message: notRunningMessage
       };
     }
 
@@ -625,6 +833,10 @@ export class CamilleMCPServer {
     textSummary += `- Queue Size: ${queueSize}`;
 
     return {
+      content: [{
+        type: 'text',
+        text: textSummary
+      }],
       running,
       indexReady,
       indexing,
@@ -672,6 +884,189 @@ export class CamilleMCPServer {
     }
 
     return details;
+  }
+
+  /**
+   * Handles memory recall requests
+   */
+  public async handleRecallMemory(args: any): Promise<any> {
+    const { query, project_filter, time_range = 'all', limit = 10 } = args;
+
+    try {
+      // Check if memory is enabled
+      const config = new ConfigManager();
+      if (!config.getConfig().memory?.enabled) {
+        const errorMessage = 'Memory system is not enabled. Run "camille setup" to enable it.';
+        return {
+          content: [{
+            type: 'text',
+            text: errorMessage
+          }],
+          error: errorMessage,
+          hint: 'The memory system needs to be configured to store and search conversation history.'
+        };
+      }
+
+      // Create unified search instance
+      const search = new UnifiedSearch();
+
+      // Perform search
+      const results = await search.search(query, {
+        limit,
+        projectFilter: project_filter,
+        timeRange: time_range as any,
+        includeGraph: false, // Only search conversations for now
+        scoreThreshold: 0.5
+      });
+
+      if (results.conversations.length === 0) {
+        const noResultsMessage = `No relevant conversations found for query: "${query}"\n\nFilters applied:\n- Project: ${project_filter || 'All projects'}\n- Time range: ${time_range}\n\nTry broader search terms or different time ranges.`;
+        return {
+          content: [{
+            type: 'text',
+            text: noResultsMessage
+          }],
+          message: 'No relevant conversations found',
+          query,
+          filters: { project_filter, time_range },
+          hint: 'Try broader search terms or different time ranges'
+        };
+      }
+
+      // Format results for Claude
+      let textSummary = `Found ${results.conversations.length} relevant conversation${results.conversations.length > 1 ? 's' : ''}:\n\n`;
+      textSummary += `💡 To see the full context of any result, use: retrieve_memory_chunk(chunk_id: "...")\n\n`;
+      
+      for (let i = 0; i < results.conversations.length; i++) {
+        const conversation = results.conversations[i];
+        textSummary += `### Result ${i + 1}\n`;
+        textSummary += `📅 ${new Date(conversation.timestamp).toLocaleString()}\n`;
+        textSummary += `📁 Project: ${conversation.projectPath || 'Unknown'}\n`;
+        textSummary += `🏷️ Topics: ${conversation.topics?.join(', ') || 'General'}\n`;
+        textSummary += `📊 Relevance: ${(conversation.score * 100).toFixed(1)}%\n`;
+        textSummary += `🔑 Chunk ID: ${conversation.chunkId || 'Not available'}\n\n`;
+        textSummary += `💬 Context:\n${conversation.context}\n`;
+        
+        if (conversation.chunkId) {
+          textSummary += `\n📖 To see full conversation: retrieve_memory_chunk(chunk_id: "${conversation.chunkId}")\n`;
+        }
+        
+        textSummary += `\n${'─'.repeat(60)}\n\n`;
+      }
+
+      return {
+        content: [{
+          type: 'text',
+          text: textSummary.trim()
+        }],
+        results: results.conversations,
+        totalFound: results.conversations.length,
+        searchTime: results.searchTime,
+        summary: textSummary.trim()
+      };
+
+    } catch (error) {
+      logger.error('Memory recall failed', { error });
+      const errorMessage = `Memory recall failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      return {
+        content: [{
+          type: 'text',
+          text: errorMessage
+        }],
+        error: errorMessage,
+        hint: 'Make sure the memory system is properly configured and the vector database is accessible.'
+      };
+    }
+  }
+
+  /**
+   * Handles memory chunk retrieval requests
+   */
+  public async handleRetrieveChunk(args: any): Promise<any> {
+    const { chunk_id, include_adjacent = false } = args;
+
+    try {
+      // Check if memory is enabled
+      const config = new ConfigManager();
+      if (!config.getConfig().memory?.enabled) {
+        const errorMessage = 'Memory system is not enabled. Run "camille setup" to enable it.';
+        return {
+          content: [{
+            type: 'text',
+            text: errorMessage
+          }],
+          error: errorMessage
+        };
+      }
+
+      // Create vector database instance to retrieve by chunk ID
+      const vectorDB = new LanceVectorDB();
+      await vectorDB.connect();
+
+      try {
+        // Search for the specific chunk by ID
+        const results = await vectorDB.search(
+          new Array(3072).fill(0), // Dummy embedding for metadata search
+          100, // Get more results to find the specific chunk
+          { chunkId: chunk_id }
+        );
+
+        if (results.length === 0) {
+          const notFoundMessage = `Chunk not found: ${chunk_id}\n\nMake sure you're using a valid chunk ID from search results.`;
+          return {
+            content: [{
+              type: 'text',
+              text: notFoundMessage
+            }],
+            error: 'Chunk not found'
+          };
+        }
+
+        // Get the first matching result
+        const chunk = results[0];
+        
+        // Format the full chunk content
+        let textSummary = `## Memory Chunk: ${chunk_id}\n\n`;
+        textSummary += `📅 Time Range: ${new Date(chunk.metadata.startTime).toLocaleString()} - ${new Date(chunk.metadata.endTime).toLocaleString()}\n`;
+        textSummary += `📁 Project: ${chunk.metadata.projectPath || 'Unknown'}\n`;
+        textSummary += `🏷️ Topics: ${chunk.metadata.topics?.join(', ') || 'General'}\n`;
+        textSummary += `📊 Messages: ${chunk.metadata.messageCount || 'Unknown'}\n\n`;
+        textSummary += `### Full Conversation:\n\n`;
+        textSummary += chunk.content || 'No content available';
+        
+        if (include_adjacent && chunk.metadata.chunkIndex !== undefined) {
+          textSummary += `\n\n### Navigation:\n`;
+          if (chunk.metadata.chunkIndex > 0) {
+            textSummary += `⬅️ Previous: ${chunk.metadata.sessionId}-chunk-${chunk.metadata.chunkIndex - 1}\n`;
+          }
+          textSummary += `⏺️ Current: ${chunk_id} (chunk ${chunk.metadata.chunkIndex})\n`;
+          textSummary += `➡️ Next: ${chunk.metadata.sessionId}-chunk-${chunk.metadata.chunkIndex + 1}\n`;
+        }
+
+        return {
+          content: [{
+            type: 'text',
+            text: textSummary
+          }],
+          chunkId: chunk_id,
+          metadata: chunk.metadata
+        };
+
+      } finally {
+        await vectorDB.close();
+      }
+
+    } catch (error) {
+      logger.error('Chunk retrieval failed', { error, chunk_id });
+      const errorMessage = `Failed to retrieve chunk: ${error instanceof Error ? error.message : 'Unknown error'}`;
+      return {
+        content: [{
+          type: 'text',
+          text: errorMessage
+        }],
+        error: errorMessage
+      };
+    }
   }
 
   /**

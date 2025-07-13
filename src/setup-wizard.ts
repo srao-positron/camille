@@ -93,10 +93,13 @@ export class SetupWizard {
       // Step 4: Configure Claude Code hooks
       const hooksConfig = await this.setupHooks();
       
-      // Step 5: System service setup
+      // Step 5: Configure memory system
+      const memoryConfig = await this.setupMemory();
+      
+      // Step 6: System service setup
       const serviceConfig = await this.setupSystemService();
       
-      // Step 6: Review and confirm
+      // Step 7: Review and confirm
       await this.reviewConfiguration({
         provider: providerConfig.provider,
         models: providerConfig.models,
@@ -107,11 +110,12 @@ export class SetupWizard {
         directories,
         mcpConfig,
         hooksConfig,
+        memoryConfig,
         serviceConfig
       });
 
       // Apply configuration
-      await this.applyConfiguration(providerConfig, directories, mcpConfig, hooksConfig, serviceConfig);
+      await this.applyConfiguration(providerConfig, directories, mcpConfig, hooksConfig, memoryConfig, serviceConfig);
 
       // Test the setup
       await this.testSetup();
@@ -789,6 +793,94 @@ export class SetupWizard {
   }
 
   /**
+   * Sets up memory system configuration
+   */
+  private async setupMemory(): Promise<any> {
+    console.log(chalk.blue('\n🧠 Memory System\n'));
+
+    const { enableMemory } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'enableMemory',
+      message: 'Enable conversation memory system?',
+      default: true
+    }]);
+
+    if (!enableMemory) {
+      return { enabled: false };
+    }
+
+    console.log(chalk.gray('\nThe memory system allows Claude to remember past conversations'));
+    console.log(chalk.gray('and code across projects, making it more helpful over time.\n'));
+
+    // Memory size configuration
+    const { maxMemoryMB } = await inquirer.prompt([{
+      type: 'number',
+      name: 'maxMemoryMB',
+      message: 'Maximum memory usage (MB):',
+      default: 2048,
+      validate: (input: number) => {
+        if (input < 512) return 'Minimum 512 MB required';
+        if (input > 8192) return 'Maximum 8192 MB allowed';
+        return true;
+      }
+    }]);
+
+    // Transcript memory
+    const { enableTranscripts } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'enableTranscripts',
+      message: 'Enable conversation transcript memory?',
+      default: true
+    }]);
+
+    // Peer sharing
+    const { enablePeerSharing } = await inquirer.prompt([{
+      type: 'confirm',
+      name: 'enablePeerSharing',
+      message: 'Enable peer-to-peer memory sharing with team members?',
+      default: false
+    }]);
+
+    let peerConfig: any = { enabled: false };
+    if (enablePeerSharing) {
+      const { port } = await inquirer.prompt([{
+        type: 'number',
+        name: 'port',
+        message: 'Port for peer-to-peer communication:',
+        default: 7861,
+        validate: (input: number) => {
+          if (input < 1024 || input > 65535) {
+            return 'Port must be between 1024 and 65535';
+          }
+          return true;
+        }
+      }]);
+
+      const { allowIndirect } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'allowIndirect',
+        message: 'Allow indirect peer searches (searches can traverse up to 3 hops)?',
+        default: false
+      }]);
+
+      peerConfig = {
+        enabled: true,
+        port,
+        allowIndirect
+      };
+    }
+
+    return {
+      enabled: true,
+      maxMemoryMB,
+      transcript: {
+        enabled: enableTranscripts
+      },
+      peer: peerConfig
+    };
+  }
+
+  /**
    * Sets up system service for auto-start
    */
   private async setupSystemService(): Promise<any> {
@@ -851,6 +943,9 @@ export class SetupWizard {
       config.directories.map((d: string) => chalk.gray('  • ') + d).join('\n') + '\n\n' +
       chalk.gray('MCP Server: ') + (config.mcpConfig.enabled ? chalk.green('Enabled') : chalk.red('Disabled')) + '\n' +
       chalk.gray('Code Review Hooks: ') + (config.hooksConfig.enabled ? chalk.green('Enabled') : chalk.red('Disabled')) + '\n' +
+      chalk.gray('Memory System: ') + (config.memoryConfig?.enabled ? chalk.green('Enabled') : chalk.red('Disabled')) + '\n' +
+      (config.memoryConfig?.enabled ? chalk.gray('  • Max Memory: ') + chalk.green(config.memoryConfig.maxMemoryMB + ' MB') + '\n' : '') +
+      (config.memoryConfig?.peer?.enabled ? chalk.gray('  • Peer Sharing: ') + chalk.green('Enabled on port ' + config.memoryConfig.peer.port) + '\n' : '') +
       chalk.gray('Auto-start Service: ') + (config.serviceConfig.enabled ? chalk.green('Enabled') : chalk.red('Disabled')),
       {
         padding: 1,
@@ -885,6 +980,7 @@ export class SetupWizard {
     directories: string[],
     mcpConfig: any,
     hooksConfig: any,
+    memoryConfig: any,
     serviceConfig: any
   ): Promise<void> {
     const spinner = ora('Applying configuration...').start();
@@ -908,12 +1004,28 @@ export class SetupWizard {
         watchedDirectories: directories,
         mcp: mcpConfig,
         hooks: hooksConfig,
+        memory: memoryConfig.enabled ? {
+          enabled: true,
+          maxMemoryMB: memoryConfig.maxMemoryMB,
+          databases: {
+            vector: { type: 'lancedb', cacheSize: 512 },
+            graph: { type: 'kuzu', cacheSize: 256 }
+          },
+          indexing: {
+            chunkSize: 2000,
+            chunkOverlap: 200,
+            embeddingModel: 'text-embedding-3-large',
+            batchSize: 20
+          },
+          peer: memoryConfig.peer || { enabled: false, port: 7861, allowIndirect: false, maxPeers: 10 },
+          transcript: memoryConfig.transcript || { enabled: true, retentionDays: 90, maxChunksPerSession: 1000 }
+        } : undefined,
         autoStart: serviceConfig
       });
 
       // Create Claude Code settings file
-      if (hooksConfig.enabled || mcpConfig.enabled) {
-        await this.createClaudeCodeSettings(hooksConfig, mcpConfig, spinner);
+      if (hooksConfig.enabled || mcpConfig.enabled || memoryConfig.enabled) {
+        await this.createClaudeCodeSettings(hooksConfig, mcpConfig, memoryConfig, spinner);
       }
 
       // Set up system service
@@ -932,9 +1044,21 @@ export class SetupWizard {
   /**
    * Creates Claude Code settings file
    */
-  private async createClaudeCodeSettings(hooksConfig: any, mcpConfig: any, spinner?: Ora): Promise<void> {
+  private async createClaudeCodeSettings(hooksConfig: any, mcpConfig: any, memoryConfig: any, spinner?: Ora): Promise<void> {
     // Handle hooks configuration in ~/.claude/settings.json
-    if (hooksConfig.enabled) {
+    const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
+    const settingsDir = path.dirname(settingsPath);
+    
+    if (!fs.existsSync(settingsDir)) {
+      fs.mkdirSync(settingsDir, { recursive: true });
+    }
+    
+    let settings: any = { hooks: {} };
+    
+    // Check if we need to configure any hooks
+    const needsHooks = hooksConfig.enabled || (memoryConfig.enabled && memoryConfig.transcript?.enabled);
+    
+    if (needsHooks) {
       // Determine the hook command based on installation context
       let hookCommand: string;
       
@@ -954,23 +1078,48 @@ export class SetupWizard {
         }
       }
       
-      let settings: any = {
-        hooks: {
-          PreToolUse: [{
-            matcher: 'Edit|MultiEdit|Write|Update|Create',  // Match specific code editing tools
-            hooks: [{
-              type: 'command',
-              command: hookCommand
-            }]
+      // Start building settings
+      settings.hooks = {};
+      
+      // Add PreToolUse hook for code review if enabled
+      if (hooksConfig.enabled) {
+        settings.hooks.PreToolUse = [{
+          matcher: 'Edit|MultiEdit|Write|Update|Create',  // Match specific code editing tools
+          hooks: [{
+            type: 'command',
+            command: hookCommand
           }]
+        }];
+      }
+      
+      // Add PreCompact hook for memory if enabled
+      if (memoryConfig.enabled && memoryConfig.transcript?.enabled) {
+        // Determine the memory hook command based on installation context
+        let memoryHookCommand: string;
+        
+        // Check if we're in development (running from source)
+        const devMemoryHookPath = path.join(__dirname, '..', 'bin', 'camille-memory-hook.sh');
+        if (fs.existsSync(devMemoryHookPath)) {
+          // Use absolute path in development
+          memoryHookCommand = devMemoryHookPath;
+        } else {
+          // In production, check for global/local installation
+          const npmBinPath = path.join(__dirname, '..', '..', 'bin', 'camille-memory-hook.sh');
+          if (fs.existsSync(npmBinPath)) {
+            memoryHookCommand = npmBinPath;
+          } else {
+            // Fallback to using the camille command directly
+            memoryHookCommand = 'camille memory-hook';
+          }
         }
-      };
-
-      const settingsPath = path.join(os.homedir(), '.claude', 'settings.json');
-      const settingsDir = path.dirname(settingsPath);
-
-      if (!fs.existsSync(settingsDir)) {
-        fs.mkdirSync(settingsDir, { recursive: true });
+        
+        settings.hooks.PreCompact = [{
+          matcher: 'manual|auto',  // Match manual and auto compaction
+          hooks: [{
+            type: 'command',
+            command: memoryHookCommand
+          }]
+        }];
       }
 
       // Merge with existing settings

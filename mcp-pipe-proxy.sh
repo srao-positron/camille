@@ -8,7 +8,7 @@
 if [[ "$OSTYPE" == "msys" || "$OSTYPE" == "win32" ]]; then
     PIPE_PATH="\\\\.\\pipe\\camille-mcp"
 else
-    PIPE_PATH="/tmp/camille-mcp.sock"
+    PIPE_PATH="$HOME/.camille/camille-mcp.sock"
 fi
 
 # Check if the named pipe exists

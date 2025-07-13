@@ -435,6 +435,20 @@ export class CamilleServer {
         const result = await this.handleGetStatus(args);
         return result;
       });
+      
+      this.mcpProtocolServer.registerTool(TOOLS.recallMemory, async (args: any) => {
+        const { CamilleMCPServer } = require('./mcp-server');
+        const mcpServer = new CamilleMCPServer();
+        const result = await mcpServer.handleRecallMemory(args);
+        return result;
+      });
+      
+      this.mcpProtocolServer.registerTool(TOOLS.retrieveChunk, async (args: any) => {
+        const { CamilleMCPServer } = require('./mcp-server');
+        const mcpServer = new CamilleMCPServer();
+        const result = await mcpServer.handleRetrieveChunk(args);
+        return result;
+      });
     }
     
     // Handle message through protocol server

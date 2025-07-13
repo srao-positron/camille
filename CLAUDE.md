@@ -2,6 +2,47 @@
 
 This document contains specific instructions for Claude when working on the Camille codebase.
 
+## IMPORTANT: Memory System Usage
+
+When working on this codebase, you MUST use the memory tools to maintain continuity and learn from past discussions:
+
+1. **Before starting any task**, search for related past work:
+   - Use `recall_previous_discussions` to find relevant conversations
+   - Example: "search for authentication implementation" or "find previous bug fixes"
+
+2. **When you see references to past work**, retrieve the full context:
+   - Use `retrieve_memory_chunk` with the chunk ID from search results
+   - This provides complete conversation history and decisions made
+
+3. **Common scenarios where memory search is REQUIRED**:
+   - User mentions "we discussed" or "remember when"
+   - Working on features that might have been implemented before
+   - Debugging issues that might have been encountered previously
+   - Following up on incomplete tasks
+   - Understanding architectural decisions
+
+4. **Memory search patterns**:
+   - Bug fixes: Search for the error message or symptom
+   - Features: Search for the feature name or related functionality
+   - Refactoring: Search for the module or pattern being changed
+   - Testing: Search for test patterns or previous test implementations
+
+5. **Trigger words that REQUIRE memory search**:
+   - "remember when..."
+   - "we discussed..."
+   - "last time..."
+   - "previously..."
+   - "continue where we left off"
+   - "what was that issue with..."
+   - "how did we solve..."
+   - "the approach we decided on..."
+   
+6. **Proactive memory usage**:
+   - Start EVERY session by searching for recent work on the current project
+   - Before ANY implementation, search for similar features
+   - When encountering an error, search for that error message
+   - When the user asks a question, search for related discussions first
+
 ## Project Overview
 
 Camille is a security-focused code review and search tool that integrates with Claude Code through hooks and MCP. It uses OpenAI's API to validate code changes against project rules and security best practices.
@@ -174,12 +215,73 @@ Follow conventional commits:
 
 ## When Making Changes
 
-1. **Read First**: Always read existing code patterns before implementing
-2. **Test Driven**: Write tests for new functionality
-3. **Security Review**: Consider security implications of all changes
-4. **Documentation**: Update relevant documentation and comments
-5. **Type Safety**: Ensure full TypeScript compliance
-6. **Claude Code Focus**: Always reference "Claude Code" not "Claude Desktop" in all contexts
+1. **Memory Search First**: ALWAYS use `recall_previous_discussions` to search for related past work before starting
+2. **Read First**: Always read existing code patterns before implementing
+3. **Test Driven**: Write tests for new functionality
+4. **Security Review**: Consider security implications of all changes
+5. **Documentation**: Update relevant documentation and comments
+6. **Type Safety**: Ensure full TypeScript compliance
+7. **Claude Code Focus**: Always reference "Claude Code" not "Claude Desktop" in all contexts
+
+### Memory Tool Usage Examples
+
+Before implementing any feature, search for context:
+```
+# Good practices:
+recall_previous_discussions("authentication implementation")
+recall_previous_discussions("error handling patterns")
+recall_previous_discussions("database schema changes")
+
+# When user mentions past work:
+User: "Remember when we discussed the caching strategy?"
+You: *immediately use* recall_previous_discussions("caching strategy")
+
+# When debugging:
+recall_previous_discussions("TypeError cannot read property")
+recall_previous_discussions("OpenAI API error")
+```
+
+## Memory System Design
+
+Camille now includes a comprehensive memory and knowledge system with three major components:
+
+### 1. Claude Code Transcript Memory
+- **PreCompact Hook**: Captures conversation transcripts before compaction
+- **Semantic Chunking**: Intelligently splits conversations into searchable chunks
+- **Vector Search**: Uses LanceDB for fast semantic search across all conversations
+- **Incremental Processing**: Only processes new messages to avoid duplication
+- **MCP Tools**: Provides `recall_previous_discussions`, `find_similar_problems`, and `search_code_history` tools
+
+### 2. Peer-to-Peer Memory Sharing
+- **mDNS/Bonjour Discovery**: Automatically discovers team members on local network
+- **REST API**: Secure HTTPS endpoints with API key authentication
+- **Request Forwarding**: Searches can traverse up to 3 hops with loop detection
+- **Result Aggregation**: Intelligently merges results from multiple peers
+- **Privacy First**: All sharing requires explicit configuration and API keys
+
+### 3. Code Object Graph Indexing
+- **Language Parsers**: Extracts functions, classes, and relationships from code
+- **Graph Database**: Uses Kuzu for storing and querying code structure
+- **Cypher Queries**: Find dependencies, call graphs, and architectural patterns
+- **Unified Search**: Combines vector and graph search for comprehensive results
+
+### Memory System Architecture
+```
+~/.camille/memory/
+├── vectors/           # LanceDB vector storage
+│   ├── transcripts/   # Conversation embeddings
+│   ├── code/          # Code embeddings
+│   └── metadata/      # Index metadata
+├── graph/             # Kuzu graph database
+│   ├── schema/        # Graph schema definitions
+│   └── data/          # Graph data files
+└── sqlite/            # SQLite for metadata & config
+    ├── peers.db       # Peer configuration
+    ├── projects.db    # Project metadata
+    └── audit.db       # Access logs
+```
+
+For detailed design specifications, see the `docs/memory-system/` directory.
 
 ## Dependencies
 
@@ -189,5 +291,9 @@ Only use these approved dependencies:
 - Chokidar for file watching
 - MCP SDK for protocol implementation
 - Standard Node.js built-ins
+- **LanceDB**: Embedded vector database for semantic search
+- **Kuzu**: Embedded graph database for code relationships
+- **Bonjour**: mDNS/Bonjour for peer discovery
+- **node-forge**: Certificate generation for HTTPS
 
 Do not add new dependencies without careful consideration of security and necessity.

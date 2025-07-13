@@ -528,6 +528,33 @@ program
   });
 
 /**
+ * Memory hook command (for PreCompact hook)
+ */
+program
+  .command('memory-hook', { hidden: true })
+  .description('Run as a Claude Code PreCompact hook (internal use)')
+  .action(async () => {
+    // Read input from stdin
+    let input = '';
+    process.stdin.setEncoding('utf8');
+    
+    for await (const chunk of process.stdin) {
+      input += chunk;
+    }
+    
+    if (!input) {
+      console.error('No input provided to memory hook');
+      process.exit(2);
+    }
+    
+    // Import and run the PreCompact hook
+    const { PreCompactHook } = await import('./memory/hooks/precompact-hook.js');
+    const hook = new PreCompactHook();
+    const parsedInput = JSON.parse(input);
+    await hook.run(parsedInput);
+  });
+
+/**
  * Setup command
  */
 program

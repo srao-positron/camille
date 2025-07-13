@@ -44,6 +44,14 @@ def get_pipe_path():
 
 def send_response(response_obj):
     """Send a response object to stdout."""
+    # Special debug for tools/list
+    if (isinstance(response_obj, dict) and 
+        response_obj.get('result', {}).get('tools') is not None):
+        tools = response_obj['result']['tools']
+        log(f"TOOLS/LIST RESPONSE: {len(tools)} tools", {
+            'tool_names': [t.get('name', 'unknown') for t in tools]
+        })
+    
     response_str = json.dumps(response_obj)
     log(f"SENDING RESPONSE TO CLAUDE CODE", response_obj)
     print(response_str)

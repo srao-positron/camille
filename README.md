@@ -351,6 +351,28 @@ To customize prompts, create files in the prompts directory with your custom con
 | `expansiveReview` | `true` | Enable comprehensive reviews with codebase access |
 | `ignorePatterns` | `["node_modules/**", "*.log", ...]` | Files to ignore |
 
+## Project Configuration with CLAUDE.md
+
+Camille uses a `CLAUDE.md` file in your project root to define project-specific rules and guidelines. This file serves multiple purposes:
+
+1. **Code Review Rules**: Define security requirements, coding standards, and architectural decisions
+2. **Claude Code Instructions**: Provide instructions that Claude Code will follow when working on your project
+3. **Tool Usage Guidance**: The Camille project's own `CLAUDE.md` demonstrates how to encourage Claude to proactively use tools, especially the memory recall tools
+
+### Example: Encouraging Tool Usage
+
+The Camille project's `CLAUDE.md` includes examples of how to ensure Claude uses available tools effectively. Key strategies include:
+
+- **Required Actions**: Marking certain tool usage as REQUIRED, not optional
+- **Trigger Words**: Defining phrases that must trigger tool usage (e.g., "remember when", "we discussed")
+- **Workflow Integration**: Making tool usage the first step in any task
+- **Concrete Examples**: Providing specific usage examples for different scenarios
+
+To see a comprehensive example, check the `CLAUDE.md` file in the Camille repository, which shows how to:
+- Ensure memory tools are used to maintain continuity across sessions
+- Define when specific tools must be used
+- Integrate tool usage into standard workflows
+
 ## How It Works
 
 ### Hook Mode
