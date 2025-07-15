@@ -79,13 +79,35 @@ Expected results:
       "path": "src/auth/login.ts",
       "similarity": "0.834",
       "summary": "Handles user authentication with JWT tokens, password verification using bcrypt, and session management. Includes rate limiting and failed login tracking.",
-      "preview": "export async function login(email: string, password: string) {\\n  const user = await User.findOne({ email });\\n  if (!user || !await bcrypt.compare(password, user.passwordHash)) {\\n    throw new AuthenticationError('Invalid credentials');\\n  }..."
+      "preview": "export async function login(email: string, password: string) {\\n  const user = await User.findOne({ email });\\n  if (!user || !await bcrypt.compare(password, user.passwordHash)) {\\n    throw new AuthenticationError('Invalid credentials');\\n  }...",
+      "lineMatches": [
+        {
+          "location": "src/auth/login.ts:42",
+          "lineNumber": 42,
+          "line": "export async function login(email: string, password: string) {",
+          "snippet": "   39: import { AuthenticationError } from './errors';\\n   40: \\n   41: // Main login function\\n>  42: export async function login(email: string, password: string) {\\n   43:   const user = await User.findOne({ email });\\n   44:   if (!user || !await bcrypt.compare(password, user.passwordHash)) {"
+        },
+        {
+          "location": "src/auth/login.ts:89",
+          "lineNumber": 89,
+          "line": "const token = jwt.sign({ userId: user.id }, secret);",
+          "snippet": "   86:   // Generate JWT token\\n   87:   const secret = process.env.JWT_SECRET;\\n   88:   \\n>  89:   const token = jwt.sign({ userId: user.id }, secret);\\n   90:   \\n   91:   return { token, user };"
+        }
+      ]
     },
     {
       "path": "src/middleware/auth.ts",
       "similarity": "0.782",
       "summary": "Express middleware for JWT token validation, role-based access control, and API authentication. Handles token refresh and revocation.",
-      "preview": "export const requireAuth = async (req, res, next) => {\\n  const token = req.headers.authorization?.split(' ')[1];\\n  if (!token) return res.status(401).json({ error: 'No token provided' });..."
+      "preview": "export const requireAuth = async (req, res, next) => {\\n  const token = req.headers.authorization?.split(' ')[1];\\n  if (!token) return res.status(401).json({ error: 'No token provided' });...",
+      "lineMatches": [
+        {
+          "location": "src/middleware/auth.ts:15",
+          "lineNumber": 15,
+          "line": "export const requireAuth = async (req, res, next) => {",
+          "snippet": "   12: import { verifyToken } from '../utils/jwt';\\n   13: \\n   14: // Main authentication middleware\\n>  15: export const requireAuth = async (req, res, next) => {\\n   16:   const token = req.headers.authorization?.split(' ')[1];\\n   17:   if (!token) return res.status(401).json({ error: 'No token provided' });"
+        }
+      ]
     }
   ],
   "totalFiles": 127,
@@ -114,6 +136,22 @@ Expected results:
           type: 'number',
           description: 'Maximum number of results to return (default: 10)',
           default: 10
+        },
+        searchMode: {
+          type: 'string',
+          enum: ['vector', 'graph', 'unified'],
+          description: 'Search strategy: vector (semantic embeddings), graph (code structure), or unified (both)',
+          default: 'unified'
+        },
+        includeGraph: {
+          type: 'boolean',
+          description: 'Include graph-based search results showing code relationships',
+          default: true
+        },
+        includeDependencies: {
+          type: 'boolean',
+          description: 'Include dependency information (imports, calls, inheritance) in results',
+          default: true
         }
       },
       required: ['query']
@@ -612,119 +650,11 @@ export class CamilleMCPServer {
       return response;
     });
 
-    // Handle tool calls
-    this.server.setRequestHandler('tools/call', async (request: any) => {
-      const { name, arguments: args } = request.params;
-
-      switch (name) {
-        case 'search_code':
-          return await this.handleSearchCode(args);
-        case 'validate_code':
-          return await this.handleValidateChanges(args);
-        case 'server_status':
-          return await this.handleGetStatus(args);
-        case 'recall_previous_discussions':
-          return await this.handleRecallMemory(args);
-        case 'retrieve_memory_chunk':
-          return await this.handleRetrieveChunk(args);
-        default:
-          throw new Error(`Unknown tool: ${name}`);
-      }
-    });
+    // Note: Tool calls are handled directly by the protocol server via registerTool() in server.ts
+    // No need for a switch statement handler here
   }
 
-  /**
-   * Handles code search requests
-   */
-  private async handleSearchCode(args: any): Promise<any> {
-    const { query, limit = 10 } = args;
-
-    // Check if server is running
-    const server = ServerManager.getInstance();
-    if (!server) {
-      const errorMessage = 'Camille server is not running. Start it with "camille server start"';
-      return {
-        content: [{
-          type: 'text',
-          text: errorMessage
-        }],
-        error: errorMessage
-      };
-    }
-
-    const embeddingsIndex = server.getEmbeddingsIndex();
-    if (!embeddingsIndex.isIndexReady()) {
-      logger.info('Search attempted while index not ready');
-      const indexingMessage = 'Index is still building. Please wait for initial indexing to complete.';
-      return {
-        content: [{
-          type: 'text',
-          text: indexingMessage
-        }],
-        error: indexingMessage,
-        status: 'indexing',
-        hint: 'The server is currently indexing files. This usually takes a few seconds depending on the project size.'
-      };
-    }
-
-    try {
-      // Generate embedding for the query
-      const config = this.configManager.getConfig();
-      
-      // Ensure OpenAI API key is available for embeddings
-      if (!config.openaiApiKey) {
-        const errorMessage = 'OpenAI API key is required for code search. Please configure it using: camille config set openaiApiKey <key>';
-        return {
-          content: [{
-            type: 'text',
-            text: errorMessage
-          }],
-          error: errorMessage
-        };
-      }
-      
-      const llmClient = new LLMClient(config, process.cwd());
-      const queryEmbedding = await llmClient.generateEmbedding(query);
-      
-      // Search the index
-      const results = embeddingsIndex.search(queryEmbedding, limit);
-      
-      // Format results for Claude
-      const formattedResults = results.map((result: SearchResult) => ({
-        path: path.relative(process.cwd(), result.path),
-        similarity: result.similarity.toFixed(3),
-        summary: result.summary || 'No summary available',
-        preview: result.content.substring(0, 200) + '...'
-      }));
-
-      // Generate text summary
-      let textSummary = `Found ${formattedResults.length} matching files out of ${embeddingsIndex.getIndexSize()} indexed files:\n\n`;
-      for (const result of formattedResults) {
-        textSummary += `📄 ${result.path} (${result.similarity} similarity)\n`;
-        textSummary += `   ${result.summary}\n\n`;
-      }
-
-      return {
-        content: [{
-          type: 'text',
-          text: textSummary.trim()
-        }],
-        results: formattedResults,
-        totalFiles: embeddingsIndex.getIndexSize(),
-        summary: textSummary.trim()
-      };
-
-    } catch (error) {
-      const errorMessage = `Search failed: ${error instanceof Error ? error.message : 'Unknown error'}`;
-      return {
-        content: [{
-          type: 'text',
-          text: errorMessage
-        }],
-        error: errorMessage
-      };
-    }
-  }
+  // handleSearchCode removed - now handled directly in server.ts via tool registration
 
   /**
    * Handles validation requests

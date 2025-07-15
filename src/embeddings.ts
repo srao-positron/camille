@@ -8,6 +8,7 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import { glob } from 'glob';
 import { ConfigManager } from './config';
+import { logger } from './logger';
 
 /**
  * Represents an embedded file in the index
@@ -29,6 +30,18 @@ export interface SearchResult {
   similarity: number;
   content: string;
   summary?: string;
+  lineMatches?: LineMatch[];
+}
+
+/**
+ * Line match information for search results
+ */
+export interface LineMatch {
+  lineNumber: number;
+  line: string;
+  snippet: string;
+  matchStart?: number;
+  matchEnd?: number;
 }
 
 /**
@@ -160,17 +173,37 @@ export class EmbeddingsIndex {
   /**
    * Searches for similar files using cosine similarity
    */
-  public search(queryEmbedding: number[], limit: number = 10): SearchResult[] {
+  public search(queryEmbedding: number[], limit: number = 10, query?: string): SearchResult[] {
     const results: SearchResult[] = [];
+    logger.info('EmbeddingsIndex.search called', { 
+      limit, 
+      hasQuery: !!query,
+      query,
+      indexSize: this.index.size 
+    });
     
     for (const file of this.index.values()) {
       const similarity = this.cosineSimilarity(queryEmbedding, file.embedding);
-      results.push({
+      const result: SearchResult = {
         path: file.path,
         similarity,
         content: file.content,
         summary: file.summary
-      });
+      };
+      
+      // If query is provided, extract relevant line matches
+      if (query) {
+        const lineMatches = this.extractLineMatches(file.content, query);
+        logger.debug('Line matches extracted', {
+          file: file.path,
+          query,
+          matchCount: lineMatches.length,
+          matches: lineMatches.slice(0, 2) // Log first 2 matches
+        });
+        result.lineMatches = lineMatches;
+      }
+      
+      results.push(result);
     }
     
     // Sort by similarity (descending) and limit results
@@ -250,6 +283,95 @@ export class EmbeddingsIndex {
     }
     
     return dotProduct / (normA * normB);
+  }
+
+  /**
+   * Extracts line matches from content based on semantic relevance
+   */
+  private extractLineMatches(content: string, query: string): LineMatch[] {
+    const lines = content.split('\n');
+    const matches: LineMatch[] = [];
+    const queryLower = query.toLowerCase();
+    const queryWords = queryLower.split(/\s+/).filter(w => w.length > 2);
+    
+    logger.debug('extractLineMatches called', {
+      contentLength: content.length,
+      lineCount: lines.length,
+      query,
+      queryWords
+    });
+    
+    // Score each line for relevance
+    const lineScores: { line: string; lineNumber: number; score: number }[] = [];
+    
+    lines.forEach((line, index) => {
+      const lineLower = line.toLowerCase();
+      let score = 0;
+      
+      // Check for exact query match
+      if (lineLower.includes(queryLower)) {
+        score += 10;
+      }
+      
+      // Check for individual word matches
+      queryWords.forEach(word => {
+        if (lineLower.includes(word)) {
+          score += 3;
+        }
+      });
+      
+      // Boost scores for certain patterns
+      if (line.match(/^\s*(function|class|interface|type|const|let|var|def|public|private|protected)\s+/)) {
+        score += 2;
+      }
+      
+      if (score > 0) {
+        lineScores.push({
+          line: line.trim(),
+          lineNumber: index + 1,
+          score
+        });
+      }
+    });
+    
+    // Sort by score and take top 5 most relevant lines
+    const topLines = lineScores
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 5);
+    
+    logger.debug('Line scoring complete', {
+      totalScoredLines: lineScores.length,
+      topLinesCount: topLines.length,
+      topScores: topLines.map(l => ({ lineNum: l.lineNumber, score: l.score }))
+    });
+    
+    // For each top line, include context
+    topLines.forEach(({ line, lineNumber }) => {
+      const startLine = Math.max(0, lineNumber - 3);
+      const endLine = Math.min(lines.length, lineNumber + 2);
+      
+      const snippet = lines
+        .slice(startLine, endLine)
+        .map((l, i) => {
+          const currentLineNum = startLine + i + 1;
+          const marker = currentLineNum === lineNumber ? '>' : ' ';
+          return `${marker} ${currentLineNum.toString().padStart(4)}: ${l}`;
+        })
+        .join('\n');
+      
+      matches.push({
+        lineNumber,
+        line,
+        snippet
+      });
+    });
+    
+    logger.debug('Final line matches', {
+      matchCount: matches.length,
+      matches: matches.map(m => ({ lineNum: m.lineNumber, line: m.line.substring(0, 50) }))
+    });
+    
+    return matches;
   }
 }
 

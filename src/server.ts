@@ -18,6 +18,9 @@ import { OpenAIClient } from './openai-client';
 import { EmbeddingsIndex, FileFilter, SearchResult } from './embeddings';
 import { EMBEDDING_PROMPT } from './prompts';
 import { consoleOutput, isQuietMode } from './utils/console';
+import { KuzuGraphDB } from './memory/databases/kuzu-db.js';
+import { codeParser } from './code-parser/code-parser.js';
+import { CodeUnifiedSearch, EnhancedSearchResult, CodeSearchOptions } from './search/code-unified-search.js';
 import { logger } from './logger';
 
 /**
@@ -29,6 +32,12 @@ export interface ServerStatus {
   indexSize: number;
   queueSize: number;
   watchedDirectories: string[];
+  graphIndexing: {
+    isReady: boolean;
+    isIndexing: boolean;
+    nodeCount: number;
+    edgeCount: number;
+  };
 }
 
 /**
@@ -39,6 +48,7 @@ export class CamilleServer {
   private llmClient: LLMClient;
   private openaiClient: OpenAIClient;
   private embeddingsIndex: EmbeddingsIndex;
+  private graphDB: KuzuGraphDB;
   private fileFilter: FileFilter;
   private watchers: Map<string, chokidar.FSWatcher>;
   private watchedDirectories: Set<string>;
@@ -59,6 +69,7 @@ export class CamilleServer {
     const openaiApiKey = this.configManager.getOpenAIApiKey();
     this.openaiClient = new OpenAIClient(openaiApiKey, config, process.cwd());
     this.embeddingsIndex = new EmbeddingsIndex(this.configManager);
+    this.graphDB = new KuzuGraphDB();
     this.fileFilter = new FileFilter(config.ignorePatterns);
     
     // Initialize collections
@@ -73,7 +84,13 @@ export class CamilleServer {
       isIndexing: false,
       indexSize: 0,
       queueSize: 0,
-      watchedDirectories: []
+      watchedDirectories: [],
+      graphIndexing: {
+        isReady: false,
+        isIndexing: false,
+        nodeCount: 0,
+        edgeCount: 0
+      }
     };
     
     // Set up named pipe path in ~/.camille directory for consistency
@@ -91,6 +108,15 @@ export class CamilleServer {
     logger.logServerEvent('server_starting', { directories });
     
     this.status.isRunning = true;
+    
+    // Initialize graph database
+    try {
+      await this.graphDB.connect();
+      consoleOutput.info(chalk.green('✅ Graph database connected'));
+    } catch (error) {
+      logger.error('Failed to connect to graph database', { error });
+      consoleOutput.warning(chalk.yellow('⚠️  Graph database unavailable - search will use vector only'));
+    }
     
     // Start the named pipe server IMMEDIATELY for MCP communication
     await this.startPipeServer();
@@ -272,7 +298,13 @@ export class CamilleServer {
       ...this.status,
       indexSize: this.embeddingsIndex.getIndexSize(),
       queueSize: this.indexQueue.size,
-      watchedDirectories: Array.from(this.watchedDirectories)
+      watchedDirectories: Array.from(this.watchedDirectories),
+      graphIndexing: {
+        ...this.status.graphIndexing,
+        isReady: this.status.graphIndexing.isReady,
+        // Note: nodeCount and edgeCount would need to be tracked or queried from Kuzu
+        // For now, we'll keep the status values
+      }
     };
   }
 
@@ -281,6 +313,13 @@ export class CamilleServer {
    */
   public getEmbeddingsIndex(): EmbeddingsIndex {
     return this.embeddingsIndex;
+  }
+
+  /**
+   * Gets the graph database
+   */
+  public getGraphDB(): KuzuGraphDB {
+    return this.graphDB;
   }
 
   /**
@@ -481,24 +520,79 @@ export class CamilleServer {
    * Handles code search requests
    */
   private async handleSearchCode(args: any): Promise<any> {
-    const { query, limit = 10, responseFormat = 'both' } = args;
+    const { 
+      query, 
+      limit = 10, 
+      responseFormat = 'both',
+      searchMode = 'unified',
+      includeGraph = true,
+      includeDependencies = true
+    } = args;
     
     try {
-      const queryEmbedding = await this.openaiClient.generateEmbedding(query);
-      const results = this.embeddingsIndex.search(queryEmbedding, limit);
+      // Create unified search instance
+      const unifiedSearch = new CodeUnifiedSearch(
+        this.embeddingsIndex,
+        this.graphDB,
+        this.openaiClient
+      );
+
+      // Perform unified search
+      const searchOptions: CodeSearchOptions = {
+        limit,
+        searchMode,
+        includeGraph,
+        includeDependencies
+      };
+      
+      const results = await unifiedSearch.search(query, searchOptions);
       
       const jsonResult: any = {
-        results: results.map((result: SearchResult) => ({
-          path: path.relative(process.cwd(), result.path),
-          similarity: result.similarity.toFixed(3),
-          summary: result.summary || 'No summary available',
-          preview: result.content.substring(0, 200) + '...'
-        })),
+        results: results.map((result: EnhancedSearchResult) => {
+          const relativePath = path.relative(process.cwd(), result.path);
+          const formattedResult: any = {
+            path: relativePath,
+            similarity: result.similarity.toFixed(3),
+            summary: result.summary || 'No summary available',
+            preview: result.content.substring(0, 200) + '...',
+            lineMatches: result.lineMatches?.map(match => ({
+              location: `${relativePath}:${match.lineNumber}`,
+              lineNumber: match.lineNumber,
+              line: match.line,
+              snippet: match.snippet
+            }))
+          };
+
+          // Include dependency information if available
+          if (result.dependencies) {
+            formattedResult.dependencies = result.dependencies;
+          }
+
+          // Include graph matches if available
+          if (result.graphMatches) {
+            formattedResult.graphMatches = result.graphMatches.map(match => ({
+              node: {
+                ...match.node,
+                file: path.relative(process.cwd(), match.node.file)
+              },
+              relationshipCount: match.relationships.edges.length
+            }));
+          }
+
+          return formattedResult;
+        }),
         totalFiles: this.embeddingsIndex.getIndexSize(),
         indexStatus: {
           ready: this.embeddingsIndex.isIndexReady(),
           filesIndexed: this.embeddingsIndex.getIndexSize(),
-          isIndexing: this.status.isIndexing
+          isIndexing: this.status.isIndexing,
+          graphReady: this.status.graphIndexing.isReady,
+          graphIndexing: this.status.graphIndexing.isIndexing
+        },
+        searchMode,
+        queryAnalysis: {
+          includeGraph,
+          includeDependencies
         }
       };
       
@@ -549,7 +643,49 @@ export class CamilleServer {
     results.results.forEach((result: any, index: number) => {
       text += `${index + 1}. ${result.path} (similarity: ${result.similarity})\n`;
       text += `   Summary: ${result.summary}\n`;
-      text += `   Preview: ${result.preview}\n\n`;
+      text += `   Preview: ${result.preview}\n`;
+      
+      // Include line matches if available
+      if (result.lineMatches && result.lineMatches.length > 0) {
+        text += `\n   Relevant locations:\n`;
+        result.lineMatches.forEach((match: any) => {
+          text += `   • ${match.location}: ${match.line}\n`;
+        });
+      }
+
+      // Include dependency information if available
+      if (result.dependencies) {
+        const deps = result.dependencies;
+        if (deps.imports.length > 0 || deps.calls.length > 0 || deps.usedBy.length > 0) {
+          text += `\n   Dependencies:\n`;
+          
+          if (deps.imports.length > 0) {
+            text += `   • Imports: ${deps.imports.slice(0, 3).join(', ')}${deps.imports.length > 3 ? '...' : ''}\n`;
+          }
+          
+          if (deps.calls.length > 0) {
+            text += `   • Calls: ${deps.calls.slice(0, 2).map((c: any) => c.function).join(', ')}${deps.calls.length > 2 ? '...' : ''}\n`;
+          }
+          
+          if (deps.usedBy.length > 0) {
+            text += `   • Used by: ${deps.usedBy.slice(0, 2).map((u: any) => `${u.function} (${u.file})`).join(', ')}${deps.usedBy.length > 2 ? '...' : ''}\n`;
+          }
+        }
+      }
+
+      // Include graph matches if available
+      if (result.graphMatches && result.graphMatches.length > 0) {
+        text += `\n   Code structure:\n`;
+        result.graphMatches.forEach((match: any) => {
+          text += `   • ${match.node.type}: ${match.node.name} (line ${match.node.line})`;
+          if (match.relationshipCount > 0) {
+            text += ` - ${match.relationshipCount} relationships`;
+          }
+          text += `\n`;
+        });
+      }
+      
+      text += `\n`;
     });
     
     text += `\nIndex Status: ${results.indexStatus.ready ? 'Ready' : 'Indexing...'}`;
@@ -884,6 +1020,62 @@ export class CamilleServer {
       
       // Store in index
       this.embeddingsIndex.addEmbedding(filePath, embedding, content, summary);
+      
+      // Parse code structure and store in graph database
+      try {
+        logger.debug('Starting code parsing', { path: filePath });
+        const parsedFile = await codeParser.parseFile(filePath, content);
+        
+        if (parsedFile) {
+          logger.debug('Code parsing successful', { 
+            path: filePath, 
+            nodesFound: parsedFile.nodes.length,
+            edgesFound: parsedFile.edges.length,
+            importsFound: parsedFile.imports.length,
+            exportsFound: parsedFile.exports.length
+          });
+          
+          // Store nodes and edges in graph database
+          if (parsedFile.nodes.length > 0) {
+            logger.debug('Adding nodes to graph database', { 
+              path: filePath, 
+              nodeCount: parsedFile.nodes.length,
+              nodeTypes: parsedFile.nodes.map(n => `${n.type}:${n.name}`).slice(0, 5)
+            });
+            await this.graphDB.addNodes(parsedFile.nodes);
+            logger.debug('Nodes added successfully', { path: filePath, nodeCount: parsedFile.nodes.length });
+          }
+          
+          if (parsedFile.edges.length > 0) {
+            logger.debug('Adding edges to graph database', { 
+              path: filePath, 
+              edgeCount: parsedFile.edges.length 
+            });
+            await this.graphDB.addEdges(parsedFile.edges);
+            logger.debug('Edges added successfully', { path: filePath, edgeCount: parsedFile.edges.length });
+          }
+          
+          logger.debug('Code structure indexed successfully', { 
+            path: filePath, 
+            nodes: parsedFile.nodes.length,
+            edges: parsedFile.edges.length,
+            imports: parsedFile.imports.length
+          });
+        } else {
+          logger.debug('No parsed code structure returned', { path: filePath });
+        }
+      } catch (error) {
+        logger.error('Failed to parse code structure', { 
+          path: filePath, 
+          error: {
+            message: error instanceof Error ? error.message : String(error),
+            stack: error instanceof Error ? error.stack : undefined,
+            name: error instanceof Error ? error.name : undefined
+          }
+        });
+        // Don't fail the entire indexing if code parsing fails
+      }
+      
       logger.info('File indexed successfully', { path: filePath, size: content.length });
       
     } catch (error) {

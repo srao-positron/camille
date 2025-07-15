@@ -2,7 +2,7 @@
  * Kuzu implementation of the GraphDB interface
  */
 
-import * as kuzu from 'kuzu';
+import { Database, Connection } from 'kuzu';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import * as os from 'os';
@@ -10,8 +10,8 @@ import { GraphDB, CodeNode, CodeEdge, GraphQueryResult } from './graph-db.js';
 import { logger } from '../../logger.js';
 
 export class KuzuGraphDB implements GraphDB {
-  private db?: kuzu.Database;
-  private conn?: kuzu.Connection;
+  private db?: any;
+  private conn?: any;
   private readonly dbPath: string;
   private initialized = false;
 
@@ -26,8 +26,8 @@ export class KuzuGraphDB implements GraphDB {
       await this.ensureDirectoryExists();
       
       // Connect to Kuzu
-      this.db = new kuzu.Database(this.dbPath);
-      this.conn = new kuzu.Connection(this.db);
+      this.db = new Database(this.dbPath);
+      this.conn = new Connection(this.db);
       
       // Initialize schema if needed
       if (!this.initialized) {
@@ -48,22 +48,53 @@ export class KuzuGraphDB implements GraphDB {
     }
 
     try {
+      logger.debug('Adding node to graph database', { 
+        nodeId: node.id, 
+        nodeType: node.type,
+        nodeName: node.name,
+        file: node.file,
+        line: node.line,
+        column: node.column
+      });
+      
       const metadata = JSON.stringify(node.metadata || {}).replace(/'/g, "''");
-      await this.conn.execute(
-        `CREATE (n:CodeObject {
-          id: '${node.id}',
-          type: '${node.type}',
-          name: '${node.name.replace(/'/g, "''")}}',
-          file: '${node.file.replace(/'/g, "''")}}',
-          line: ${node.line},
-          col: ${node.column || 'NULL'},
-          metadata: '${metadata}'
-        })`
-      );
+      const query = `MERGE (n:CodeObject {id: '${node.id.replace(/'/g, "''")}'})
+        ON CREATE SET 
+          n.type = '${node.type}',
+          n.name = '${node.name.replace(/'/g, "''")}',
+          n.file = '${node.file.replace(/'/g, "''")}',
+          n.line = ${node.line},
+          n.col = ${node.column || 0},
+          n.metadata = '${metadata}'
+        ON MATCH SET 
+          n.type = '${node.type}',
+          n.name = '${node.name.replace(/'/g, "''")}',
+          n.file = '${node.file.replace(/'/g, "''")}',
+          n.line = ${node.line},
+          n.col = ${node.column || 0},
+          n.metadata = '${metadata}'`;
+      
+      logger.debug('Executing Kuzu query', { query });
+      await this.conn.query(query);
+      logger.debug('Node added successfully', { nodeId: node.id });
       
       return node.id;
     } catch (error) {
-      logger.error('Failed to add node', { error, node });
+      logger.error('Failed to add node', { 
+        error: {
+          message: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+          name: error instanceof Error ? error.name : undefined
+        }, 
+        node: {
+          id: node.id,
+          type: node.type,
+          name: node.name,
+          file: node.file,
+          line: node.line,
+          column: node.column
+        }
+      });
       throw error;
     }
   }
@@ -74,23 +105,51 @@ export class KuzuGraphDB implements GraphDB {
     }
 
     try {
+      logger.debug('Adding batch of nodes to graph database', { 
+        nodeCount: nodes.length,
+        nodeTypes: nodes.map(n => n.type).join(', ')
+      });
+      
       // Batch insert for better performance
-      for (const node of nodes) {
+      for (let i = 0; i < nodes.length; i++) {
+        const node = nodes[i];
+        logger.debug(`Processing node ${i + 1}/${nodes.length}`, {
+          nodeId: node.id,
+          nodeType: node.type,
+          nodeName: node.name
+        });
+        
         const metadata = JSON.stringify(node.metadata || {}).replace(/'/g, "''");
-        await this.conn.execute(
-          `CREATE (n:CodeObject {
-            id: '${node.id}',
-            type: '${node.type}',
-            name: '${node.name.replace(/'/g, "''")}}',
-            file: '${node.file.replace(/'/g, "''")}}',
-            line: ${node.line},
-            col: ${node.column || 'NULL'},
-            metadata: '${metadata}'
-          })`
-        );
+        const query = `MERGE (n:CodeObject {id: '${node.id.replace(/'/g, "''")}'})
+          ON CREATE SET 
+            n.type = '${node.type}',
+            n.name = '${node.name.replace(/'/g, "''")}',
+            n.file = '${node.file.replace(/'/g, "''")}',
+            n.line = ${node.line},
+            n.col = ${node.column || 0},
+            n.metadata = '${metadata}'
+          ON MATCH SET 
+            n.type = '${node.type}',
+            n.name = '${node.name.replace(/'/g, "''")}',
+            n.file = '${node.file.replace(/'/g, "''")}',
+            n.line = ${node.line},
+            n.col = ${node.column || 0},
+            n.metadata = '${metadata}'`;
+        
+        logger.debug('Executing query for node', { query });
+        await this.conn.query(query);
       }
+      
+      logger.debug('All nodes added successfully', { nodeCount: nodes.length });
     } catch (error) {
-      logger.error('Failed to add nodes', { error });
+      logger.error('Failed to add nodes', { 
+        error: {
+          message: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+          name: error instanceof Error ? error.name : undefined
+        },
+        nodeCount: nodes.length
+      });
       throw error;
     }
   }
@@ -102,11 +161,8 @@ export class KuzuGraphDB implements GraphDB {
 
     try {
       const metadata = JSON.stringify(edge.metadata || {}).replace(/'/g, "''");
-      await this.conn.execute(
-        `MATCH (a:CodeObject {id: '${edge.source}'}), (b:CodeObject {id: '${edge.target}'})
-         CREATE (a)-[r:${edge.relationship.toUpperCase()} {
-           metadata: '${metadata}'
-         }]->(b)`
+      await this.conn.query(
+        `MATCH (a:CodeObject {id: '${edge.source.replace(/'/g, "''")}'}), (b:CodeObject {id: '${edge.target.replace(/'/g, "''")}'})\n         CREATE (a)-[r:${edge.relationship.toUpperCase()} {\n           metadata: '${metadata}'\n         }]->(b)`
       );
     } catch (error) {
       logger.error('Failed to add edge', { error, edge });
@@ -122,11 +178,8 @@ export class KuzuGraphDB implements GraphDB {
     try {
       for (const edge of edges) {
         const metadata = JSON.stringify(edge.metadata || {}).replace(/'/g, "''");
-        await this.conn.execute(
-          `MATCH (a:CodeObject {id: '${edge.source}'}), (b:CodeObject {id: '${edge.target}'})
-           CREATE (a)-[r:${edge.relationship.toUpperCase()} {
-             metadata: '${metadata}'
-           }]->(b)`
+        await this.conn.query(
+          `MATCH (a:CodeObject {id: '${edge.source.replace(/'/g, "''")}'}), (b:CodeObject {id: '${edge.target.replace(/'/g, "''")}'})\n           CREATE (a)-[r:${edge.relationship.toUpperCase()} {\n             metadata: '${metadata}'\n           }]->(b)`
         );
       }
     } catch (error) {
@@ -141,8 +194,8 @@ export class KuzuGraphDB implements GraphDB {
     }
 
     try {
-      const result = await this.conn.execute(cypherQuery);
-      const records = await result.getAllObjects();
+      const result = await this.conn.query(cypherQuery);
+      const records = await result.getAll();
       return records;
     } catch (error) {
       logger.error('Query failed', { error, query: cypherQuery });
@@ -284,10 +337,9 @@ export class KuzuGraphDB implements GraphDB {
     }
 
     try {
-      // Delete all relationships first
-      await this.conn.execute('MATCH (n)-[r]-() DELETE r');
-      // Then delete all nodes
-      await this.conn.execute('MATCH (n) DELETE n');
+      // Clear all data - Kuzu syntax
+      await this.conn.query('MATCH (n)-[r]-() DELETE r');
+      await this.conn.query('MATCH (n) DELETE n');
       
       logger.info('Cleared all data from graph database');
     } catch (error) {
@@ -313,7 +365,7 @@ export class KuzuGraphDB implements GraphDB {
 
     try {
       // Create node table
-      await this.conn.execute(`
+      await this.conn.query(`
         CREATE NODE TABLE IF NOT EXISTS CodeObject(
           id STRING PRIMARY KEY,
           type STRING,
@@ -329,7 +381,7 @@ export class KuzuGraphDB implements GraphDB {
       const relationships = ['CALLS', 'IMPORTS', 'EXTENDS', 'IMPLEMENTS', 'USES', 'DEFINES'];
       
       for (const rel of relationships) {
-        await this.conn.execute(`
+        await this.conn.query(`
           CREATE REL TABLE IF NOT EXISTS ${rel}(
             FROM CodeObject TO CodeObject,
             metadata STRING
@@ -337,13 +389,37 @@ export class KuzuGraphDB implements GraphDB {
         `);
       }
 
-      // Create indexes for better performance
-      await this.conn.execute('CREATE INDEX IF NOT EXISTS idx_code_type ON CodeObject(type)');
-      await this.conn.execute('CREATE INDEX IF NOT EXISTS idx_code_name ON CodeObject(name)');
-      await this.conn.execute('CREATE INDEX IF NOT EXISTS idx_code_file ON CodeObject(file)');
+      // Create indexes for better performance (Kuzu doesn't support IF NOT EXISTS for indexes)
+      try {
+        await this.conn.query('CREATE INDEX idx_code_type ON CodeObject(type)');
+      } catch (e) {
+        // Index might already exist, ignore error
+      }
+      try {
+        await this.conn.query('CREATE INDEX idx_code_name ON CodeObject(name)');
+      } catch (e) {
+        // Index might already exist, ignore error
+      }
+      try {
+        await this.conn.query('CREATE INDEX idx_code_file ON CodeObject(file)');
+      } catch (e) {
+        // Index might already exist, ignore error
+      }
       
       logger.info('Initialized Kuzu schema');
     } catch (error) {
+      // Write detailed error to file for debugging
+      const fs = require('fs');
+      const errorDetails = {
+        message: error instanceof Error ? error.message : String(error),
+        stack: error instanceof Error ? error.stack : undefined,
+        name: error instanceof Error ? error.name : undefined,
+        type: typeof error,
+        keys: Object.keys(error || {}),
+        timestamp: new Date().toISOString()
+      };
+      fs.appendFileSync('/tmp/kuzu-schema-debug.log', JSON.stringify(errorDetails, null, 2) + '\n');
+      
       logger.error('Failed to initialize schema', { error });
       throw error;
     }
