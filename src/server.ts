@@ -22,6 +22,9 @@ import { KuzuGraphDB } from './memory/databases/kuzu-db.js';
 import { codeParser } from './code-parser/code-parser.js';
 import { CodeUnifiedSearch, EnhancedSearchResult, CodeSearchOptions } from './search/code-unified-search.js';
 import { logger } from './logger';
+import { TOOLS } from './mcp-server';
+import { CodeNode, CodeEdge } from './memory/databases/graph-db.js';
+import { CamilleAPIServer } from './api-server.js';
 
 /**
  * Server status
@@ -59,6 +62,11 @@ export class CamilleServer {
   private lastConfigContent?: string;
   private pipeServer?: any;
   private pipePath: string;
+  private activeJobs: Set<string> = new Set();
+  private pendingEdges: Map<string, CodeEdge[]> = new Map();
+  private isProcessingEdges: boolean = false;
+  private apiServer?: CamilleAPIServer;
+  private unifiedSearch?: CodeUnifiedSearch;
 
   constructor() {
     this.configManager = new ConfigManager();
@@ -113,6 +121,27 @@ export class CamilleServer {
     try {
       await this.graphDB.connect();
       consoleOutput.info(chalk.green('✅ Graph database connected'));
+      
+      // Create vector indices for semantic search in graph
+      await this.graphDB.createVectorIndices();
+      
+      // Update initial graph statistics
+      this.status.graphIndexing.isReady = true;
+      this.status.graphIndexing.nodeCount = await this.graphDB.getNodeCount();
+      this.status.graphIndexing.edgeCount = await this.graphDB.getEdgeCount();
+      
+      logger.info('📊 Initial graph statistics', {
+        nodeCount: this.status.graphIndexing.nodeCount,
+        edgeCount: this.status.graphIndexing.edgeCount
+      });
+      consoleOutput.info(chalk.green('✅ Graph vector indices created'));
+      
+      // Initialize unified search
+      this.unifiedSearch = new CodeUnifiedSearch(
+        this.embeddingsIndex,
+        this.graphDB,
+        this.openaiClient
+      );
     } catch (error) {
       logger.error('Failed to connect to graph database', { error });
       consoleOutput.warning(chalk.yellow('⚠️  Graph database unavailable - search will use vector only'));
@@ -122,6 +151,16 @@ export class CamilleServer {
     await this.startPipeServer();
     consoleOutput.info(chalk.green('✅ MCP server ready - accepting connections'));
     
+    // Start the REST API server
+    try {
+      this.apiServer = new CamilleAPIServer();
+      await this.apiServer.start();
+      consoleOutput.info(chalk.green('✅ REST API server started on http://localhost:3456'));
+    } catch (error) {
+      logger.error('Failed to start API server', { error });
+      consoleOutput.warning(chalk.yellow('⚠️  REST API server unavailable'));
+    }
+    
     // Normalize to array
     const dirsToWatch = Array.isArray(directories) ? directories : [directories];
     
@@ -130,7 +169,7 @@ export class CamilleServer {
       this.embeddingsIndex.setReady(true);
       consoleOutput.info(chalk.gray('No directories to index'));
     } else {
-      // Start indexing directories in the background
+      // Start indexing directories in the background (sequentially to avoid locking issues)
       consoleOutput.info(chalk.gray('Starting background indexing...'));
       this.startBackgroundIndexing(dirsToWatch);
     }
@@ -143,6 +182,9 @@ export class CamilleServer {
     
     // Set up config file watching
     this.setupConfigWatcher();
+    
+    // Start transcript indexing as a separate background job
+    this.startTranscriptIndexingJob();
   }
 
   /**
@@ -152,8 +194,11 @@ export class CamilleServer {
     // Don't await - let it run in background
     (async () => {
       try {
+        // Process directories sequentially to avoid graph database locking issues
         for (const dir of directories) {
+          logger.info(`Starting indexing for directory: ${dir}`);
           await this.addDirectory(dir);
+          logger.info(`Completed indexing for directory: ${dir}`);
         }
         
         // Wait for index to be ready
@@ -173,6 +218,55 @@ export class CamilleServer {
         consoleOutput.error(`Background indexing failed: ${error}`);
       }
     })();
+  }
+
+  /**
+   * Starts the transcript indexing job in the background
+   */
+  private startTranscriptIndexingJob(): void {
+    const jobId = 'transcripts';
+    this.activeJobs.add(jobId);
+    
+    // Don't await - let it run independently
+    (async () => {
+      try {
+        logger.info('Starting transcript indexing job');
+        await this.indexExistingTranscripts();
+        logger.info('Completed transcript indexing job');
+      } catch (error) {
+        logger.error('Transcript indexing job failed', error as Error);
+      } finally {
+        this.activeJobs.delete(jobId);
+        await this.checkAllJobsComplete();
+      }
+    })();
+  }
+
+  /**
+   * Check if all indexing jobs are complete
+   */
+  private async checkAllJobsComplete(): Promise<void> {
+    if (this.activeJobs.size === 0) {
+      consoleOutput.success('✅ All indexing jobs complete');
+      consoleOutput.info(chalk.gray(`Total indexed files: ${this.embeddingsIndex.getIndexSize()}`));
+      
+      logger.logServerEvent('all_indexing_completed', { 
+        directories: this.getWatchedDirectories(),
+        indexSize: this.embeddingsIndex.getIndexSize() 
+      });
+      
+      // Process pending edges in second pass
+      if (this.pendingEdges.size > 0) {
+        logger.info('Starting second pass for edge processing', {
+          pendingFiles: this.pendingEdges.size
+        });
+        await this.processPendingEdges();
+      }
+    } else {
+      logger.info(`Active indexing jobs remaining: ${this.activeJobs.size}`, { 
+        jobs: Array.from(this.activeJobs) 
+      });
+    }
   }
 
   /**
@@ -260,6 +354,16 @@ export class CamilleServer {
     
     this.status.isRunning = false;
     
+    // Stop the API server
+    if (this.apiServer) {
+      try {
+        await this.apiServer.stop();
+        consoleOutput.info(chalk.gray('API server stopped'));
+      } catch (error) {
+        logger.error('Failed to stop API server', { error });
+      }
+    }
+    
     // Close all watchers
     for (const [_, watcher] of this.watchers) {
       await watcher.close();
@@ -291,6 +395,253 @@ export class CamilleServer {
   }
 
   /**
+   * Formats graph query results as text for display
+   */
+  private formatGraphResultsAsText(results: any): string {
+    let text = `Graph Query Results\n`;
+    text += `══════════════════════════════════════════════════\n\n`;
+    text += `Query: ${results.query}\n`;
+    text += `Results found: ${results.resultCount}\n\n`;
+    
+    if (results.resultCount === 0) {
+      text += `No results found.\n`;
+    } else if (results.resultCount === 1 && Object.keys(results.results[0]).length === 1) {
+      // Single value result (like COUNT)
+      const key = Object.keys(results.results[0])[0];
+      const value = results.results[0][key];
+      text += `${key}: ${value}\n`;
+    } else {
+      // Multiple results or complex objects
+      results.results.forEach((row: any, index: number) => {
+        if (index < 50) { // Limit display to first 50 results
+          text += `Result ${index + 1}:\n`;
+          for (const [key, value] of Object.entries(row)) {
+            if (typeof value === 'object' && value !== null) {
+              text += `  ${key}:\n`;
+              for (const [subKey, subValue] of Object.entries(value as any)) {
+                text += `    ${subKey}: ${subValue}\n`;
+              }
+            } else {
+              text += `  ${key}: ${value}\n`;
+            }
+          }
+          text += `\n`;
+        }
+      });
+      
+      if (results.resultCount > 50) {
+        text += `... and ${results.resultCount - 50} more results\n\n`;
+      }
+    }
+    
+    text += `\nGraph Statistics:\n`;
+    text += `• Nodes: ${results.indexStatus.nodeCount}\n`;
+    text += `• Edges: ${results.indexStatus.edgeCount}\n`;
+    text += `• Status: ${results.indexStatus.ready ? 'Ready' : 'Indexing'}\n`;
+    
+    return text;
+  }
+
+  /**
+   * Process pending edges in second pass after all nodes are indexed
+   */
+  private async processPendingEdges(): Promise<void> {
+    if (this.isProcessingEdges || this.pendingEdges.size === 0) {
+      return;
+    }
+    
+    this.isProcessingEdges = true;
+    logger.info('Starting second pass: Processing pending edges', {
+      fileCount: this.pendingEdges.size,
+      totalEdges: Array.from(this.pendingEdges.values()).reduce((sum, edges) => sum + edges.length, 0)
+    });
+    
+    try {
+      let successCount = 0;
+      let failureCount = 0;
+      
+      for (const [filePath, edges] of this.pendingEdges) {
+        logger.info('🔍 Processing edges for file', { 
+          filePath, 
+          edgeCount: edges.length 
+        });
+        
+        // Process each edge and try to resolve the target node
+        const resolvedEdges: CodeEdge[] = [];
+        
+        for (const edge of edges) {
+          logger.debug('📊 Processing edge', {
+            source: edge.source,
+            target: edge.target,
+            relationship: edge.relationship,
+            metadata: edge.metadata
+          });
+          
+          // Extract target node information from the ID
+          // Format: "path/to/file:type:name:line"
+          const targetParts = edge.target.split(':');
+          if (targetParts.length >= 4) {
+            const targetFile = targetParts[0];
+            const targetType = targetParts[1];
+            const targetName = targetParts[2];
+            const targetLine = parseInt(targetParts[3]);
+            
+            logger.debug('🔎 Looking for target node', {
+              targetFile,
+              targetType,
+              targetName,
+              targetLine,
+              originalTarget: edge.target
+            });
+            
+            // If line is 0 (unknown), try to find the actual node by name and file
+            if (targetLine === 0) {
+              const candidates = await this.graphDB.findNodesByNameAndFile(
+                targetName,
+                targetFile,
+                targetType
+              );
+              
+              logger.info('🎯 Found candidates for edge target', {
+                targetName,
+                targetFile,
+                candidateCount: candidates.length,
+                candidates: candidates.map(c => ({ id: c.id, line: c.line }))
+              });
+              
+              if (candidates.length === 1) {
+                // Single match - use it
+                resolvedEdges.push({
+                  ...edge,
+                  target: candidates[0].id
+                });
+                successCount++;
+                logger.info('✅ Edge resolved successfully', {
+                  source: edge.source,
+                  oldTarget: edge.target,
+                  newTarget: candidates[0].id
+                });
+              } else if (candidates.length > 1) {
+                // Multiple matches - use the first one (could be improved)
+                logger.warn('⚠️ Multiple candidates found, using first match', {
+                  targetName,
+                  candidateCount: candidates.length
+                });
+                resolvedEdges.push({
+                  ...edge,
+                  target: candidates[0].id
+                });
+                successCount++;
+              } else {
+                // No match found - create an external/built-in function node
+                logger.info('🔨 Creating external function node', {
+                  targetName,
+                  targetFile,
+                  targetType
+                });
+                
+                // Determine if this is a built-in function
+                const builtIns = new Set([
+                  'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval',
+                  'fetch', 'console', 'require', 'parseInt', 'parseFloat',
+                  'isNaN', 'isFinite', 'encodeURI', 'decodeURI',
+                  'encodeURIComponent', 'decodeURIComponent', 'eval',
+                  'JSON', 'Math', 'Date', 'Array', 'Object', 'String',
+                  'Number', 'Boolean', 'RegExp', 'Error', 'Promise'
+                ]);
+                
+                const isBuiltIn = builtIns.has(targetName);
+                const nodeType = isBuiltIn ? 'builtin' : 'external';
+                
+                // Create the external/built-in node
+                const externalNode: CodeNode = {
+                  id: edge.target,
+                  type: targetType as any, // Keep original type (function, class, etc)
+                  name: targetName,
+                  file: targetFile,
+                  line: 0, // External functions don't have a line number
+                  metadata: {
+                    external: true,
+                    builtIn: isBuiltIn
+                  }
+                };
+                
+                try {
+                  await this.graphDB.addNode(externalNode);
+                  logger.info('✅ Created external node', { 
+                    id: externalNode.id,
+                    name: targetName,
+                    type: nodeType
+                  });
+                  
+                  // Now add the edge to the newly created node
+                  resolvedEdges.push(edge);
+                  successCount++;
+                } catch (error) {
+                  logger.error('Failed to create external node', { 
+                    error,
+                    node: externalNode 
+                  });
+                  failureCount++;
+                }
+              }
+            } else {
+              // Line number is known, use original edge
+              resolvedEdges.push(edge);
+              successCount++;
+            }
+          } else {
+            logger.error('❌ Invalid edge target format', {
+              target: edge.target,
+              parts: targetParts.length
+            });
+            failureCount++;
+          }
+        }
+        
+        // Add all resolved edges to the graph
+        if (resolvedEdges.length > 0) {
+          logger.info('💾 Adding resolved edges to graph', {
+            filePath,
+            resolvedCount: resolvedEdges.length,
+            originalCount: edges.length
+          });
+          
+          await this.graphDB.addEdges(resolvedEdges);
+          
+          logger.info('✅ Edges added successfully', {
+            filePath,
+            addedCount: resolvedEdges.length
+          });
+        }
+      }
+      
+      // Clear pending edges after processing
+      this.pendingEdges.clear();
+      
+      // Update graph statistics
+      this.status.graphIndexing.edgeCount = await this.graphDB.getEdgeCount();
+      
+      logger.info('✅ Second pass complete', {
+        totalSuccess: successCount,
+        totalFailure: failureCount,
+        successRate: ((successCount / (successCount + failureCount)) * 100).toFixed(2) + '%',
+        finalEdgeCount: this.status.graphIndexing.edgeCount
+      });
+      
+    } catch (error) {
+      logger.error('❌ Error processing pending edges', {
+        error: error instanceof Error ? {
+          message: error.message,
+          stack: error.stack
+        } : error
+      });
+    } finally {
+      this.isProcessingEdges = false;
+    }
+  }
+
+  /**
    * Gets the current server status
    */
   public getStatus(): ServerStatus {
@@ -318,8 +669,15 @@ export class CamilleServer {
   /**
    * Gets the graph database
    */
-  public getGraphDB(): KuzuGraphDB {
+  public getGraphDatabase(): KuzuGraphDB {
     return this.graphDB;
+  }
+
+  /**
+   * Gets the unified search instance
+   */
+  public getUnifiedSearch(): CodeUnifiedSearch | undefined {
+    return this.unifiedSearch;
   }
 
   /**
@@ -488,6 +846,11 @@ export class CamilleServer {
         const result = await mcpServer.handleRetrieveChunk(args);
         return result;
       });
+      
+      this.mcpProtocolServer.registerTool(TOOLS.graphQuery, async (args: any) => {
+        const result = await this.handleGraphQuery(args);
+        return result;
+      });
     }
     
     // Handle message through protocol server
@@ -524,25 +887,23 @@ export class CamilleServer {
       query, 
       limit = 10, 
       responseFormat = 'both',
-      searchMode = 'unified',
-      includeGraph = true,
-      includeDependencies = true
+      includeDependencies = true,
+      directory
     } = args;
     
     try {
-      // Create unified search instance
-      const unifiedSearch = new CodeUnifiedSearch(
+      // Use shared unified search instance if available, otherwise create one
+      const unifiedSearch = this.unifiedSearch || new CodeUnifiedSearch(
         this.embeddingsIndex,
         this.graphDB,
         this.openaiClient
       );
 
-      // Perform unified search
+      // Perform vector search
       const searchOptions: CodeSearchOptions = {
         limit,
-        searchMode,
-        includeGraph,
-        includeDependencies
+        includeDependencies,
+        directory
       };
       
       const results = await unifiedSearch.search(query, searchOptions);
@@ -589,9 +950,7 @@ export class CamilleServer {
           graphReady: this.status.graphIndexing.isReady,
           graphIndexing: this.status.graphIndexing.isIndexing
         },
-        searchMode,
         queryAnalysis: {
-          includeGraph,
           includeDependencies
         }
       };
@@ -626,6 +985,120 @@ export class CamilleServer {
       }
     } catch (error) {
       throw error; // Let MCP protocol handle errors
+    }
+  }
+  
+  /**
+   * Handles graph query requests
+   */
+  private async handleGraphQuery(args: any): Promise<any> {
+    const { query, explain = false } = args;
+    
+    try {
+      // Ensure graph database is initialized
+      if (!this.graphDB) {
+        return {
+          error: 'Graph database not initialized. Please restart the Camille server.',
+          hint: 'The graph database needs to be running to execute Cypher queries.'
+        };
+      }
+      
+      // Validate query
+      if (!query || typeof query !== 'string') {
+        return {
+          error: 'Invalid query. Please provide a valid Cypher query string.'
+        };
+      }
+      
+      logger.info('Executing graph query', { query, explain });
+      
+      // If explain mode, just return the query plan
+      if (explain) {
+        // For now, just return the query as the plan
+        // In the future, we could add actual query plan analysis
+        return {
+          query,
+          plan: 'Query execution plan not yet implemented',
+          hint: 'Remove explain parameter to execute the query'
+        };
+      }
+      
+      // Execute the Cypher query
+      const results = await this.graphDB.query(query);
+      
+      // Format results for better readability
+      const formattedResults = results.map((row: any) => {
+        // Handle different result formats from Cypher
+        const formatted: any = {};
+        for (const [key, value] of Object.entries(row)) {
+          if (value && typeof value === 'object' && 'id' in value) {
+            // This is a node - extract key properties
+            formatted[key] = {
+              id: (value as any).id,
+              name: (value as any).name,
+              type: (value as any).type,
+              file: (value as any).file,
+              line: (value as any).line
+            };
+          } else if (value && typeof value === 'object' && 'label' in value) {
+            // This is an edge
+            formatted[key] = {
+              type: (value as any).label,
+              source: (value as any).source,
+              target: (value as any).target
+            };
+          } else {
+            // Simple value
+            formatted[key] = value;
+          }
+        }
+        return formatted;
+      });
+      
+      // Format response for MCP
+      const jsonResult = {
+        query,
+        resultCount: results.length,
+        results: formattedResults,
+        indexStatus: {
+          ready: this.graphDB.isReady(),
+          nodeCount: await this.graphDB.getNodeCount(),
+          edgeCount: await this.graphDB.getEdgeCount()
+        }
+      };
+      
+      // Return with content field for MCP display
+      return {
+        content: [
+          {
+            type: 'text',
+            text: this.formatGraphResultsAsText(jsonResult)
+          }
+        ],
+        // Also include structured data for programmatic access
+        data: jsonResult
+      };
+      
+    } catch (error) {
+      logger.error('Graph query error', { query, error });
+      
+      // Provide helpful error messages for common issues
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+      let hint = '';
+      
+      if (errorMessage.includes('Parser exception')) {
+        hint = 'Check your Cypher syntax. Common issues: missing quotes, incorrect property names, or invalid operators.';
+      } else if (errorMessage.includes('not found')) {
+        hint = 'The property or label might not exist. Use MATCH (n:CodeObject) RETURN DISTINCT keys(n) to see available properties.';
+      } else if (errorMessage.includes('timeout')) {
+        hint = 'Query took too long. Try adding LIMIT or more specific WHERE clauses.';
+      }
+      
+      return {
+        error: `Graph query failed: ${errorMessage}`,
+        query,
+        hint
+      };
     }
   }
   
@@ -910,6 +1383,11 @@ export class CamilleServer {
           } else {
             skipped++;
             logger.debug('Using cached embedding', { path: file });
+            
+            // Still need to parse code structure for graph database even if embeddings are cached
+            logger.info('Parsing code structure for cached file', { path: file });
+            const content = fs.readFileSync(file, 'utf8');
+            await this.parseAndIndexCodeStructure(file, content);
           }
           processed++;
           if (this.spinner) {
@@ -936,6 +1414,14 @@ export class CamilleServer {
         cachedFiles: skipped
       });
       this.embeddingsIndex.setReady(true);
+      
+      // Process pending edges in second pass
+      if (this.pendingEdges.size > 0) {
+        logger.info('Processing pending edges after initial indexing', {
+          pendingFiles: this.pendingEdges.size
+        });
+        await this.processPendingEdges();
+      }
       
     } catch (error) {
       if (this.spinner) this.spinner.fail(`Indexing failed: ${error}`);
@@ -1022,65 +1508,113 @@ export class CamilleServer {
       this.embeddingsIndex.addEmbedding(filePath, embedding, content, summary);
       
       // Parse code structure and store in graph database
-      try {
-        logger.debug('Starting code parsing', { path: filePath });
-        const parsedFile = await codeParser.parseFile(filePath, content);
-        
-        if (parsedFile) {
-          logger.debug('Code parsing successful', { 
-            path: filePath, 
-            nodesFound: parsedFile.nodes.length,
-            edgesFound: parsedFile.edges.length,
-            importsFound: parsedFile.imports.length,
-            exportsFound: parsedFile.exports.length
-          });
-          
-          // Store nodes and edges in graph database
-          if (parsedFile.nodes.length > 0) {
-            logger.debug('Adding nodes to graph database', { 
-              path: filePath, 
-              nodeCount: parsedFile.nodes.length,
-              nodeTypes: parsedFile.nodes.map(n => `${n.type}:${n.name}`).slice(0, 5)
-            });
-            await this.graphDB.addNodes(parsedFile.nodes);
-            logger.debug('Nodes added successfully', { path: filePath, nodeCount: parsedFile.nodes.length });
-          }
-          
-          if (parsedFile.edges.length > 0) {
-            logger.debug('Adding edges to graph database', { 
-              path: filePath, 
-              edgeCount: parsedFile.edges.length 
-            });
-            await this.graphDB.addEdges(parsedFile.edges);
-            logger.debug('Edges added successfully', { path: filePath, edgeCount: parsedFile.edges.length });
-          }
-          
-          logger.debug('Code structure indexed successfully', { 
-            path: filePath, 
-            nodes: parsedFile.nodes.length,
-            edges: parsedFile.edges.length,
-            imports: parsedFile.imports.length
-          });
-        } else {
-          logger.debug('No parsed code structure returned', { path: filePath });
-        }
-      } catch (error) {
-        logger.error('Failed to parse code structure', { 
-          path: filePath, 
-          error: {
-            message: error instanceof Error ? error.message : String(error),
-            stack: error instanceof Error ? error.stack : undefined,
-            name: error instanceof Error ? error.name : undefined
-          }
-        });
-        // Don't fail the entire indexing if code parsing fails
-      }
+      await this.parseAndIndexCodeStructure(filePath, content);
       
       logger.info('File indexed successfully', { path: filePath, size: content.length });
       
     } catch (error) {
       consoleOutput.error(`Failed to index ${filePath}: ${error}`);
       logger.error(`Failed to index file`, error, { filePath });
+    }
+  }
+
+  /**
+   * Parse and index code structure for graph database
+   */
+  private async parseAndIndexCodeStructure(filePath: string, content: string): Promise<void> {
+    try {
+      logger.debug('Starting code parsing', { path: filePath });
+      const parsedFile = await codeParser.parseFile(filePath, content);
+      
+      if (parsedFile) {
+        logger.debug('Code parsing successful', { 
+          path: filePath, 
+          nodesFound: parsedFile.nodes.length,
+          edgesFound: parsedFile.edges.length,
+          importsFound: parsedFile.imports.length,
+          exportsFound: parsedFile.exports.length
+        });
+        
+        // Store nodes and edges in graph database
+        if (parsedFile.nodes.length > 0) {
+          logger.debug('Adding nodes to graph database', { 
+            path: filePath, 
+            nodeCount: parsedFile.nodes.length,
+            nodeTypes: parsedFile.nodes.map(n => `${n.type}:${n.name}`).slice(0, 5)
+          });
+          
+          // Generate embeddings for each node
+          const nodesWithEmbeddings = await Promise.all(
+            parsedFile.nodes.map(async (node) => {
+              try {
+                // Generate embedding for node name
+                const nameEmbedding = await this.openaiClient.generateEmbedding(
+                  `${node.type} ${node.name}`
+                );
+                
+                // Generate embedding for node context (includes type, name, and file)
+                const contextString = `${node.type} ${node.name} in ${path.basename(node.file)}`;
+                const summaryEmbedding = await this.openaiClient.generateEmbedding(contextString);
+                
+                return {
+                  ...node,
+                  name_embedding: nameEmbedding,
+                  summary_embedding: summaryEmbedding
+                };
+              } catch (error) {
+                logger.warn('Failed to generate embeddings for node', { 
+                  nodeId: node.id, 
+                  error 
+                });
+                // Return node without embeddings if generation fails
+                return node;
+              }
+            })
+          );
+          
+          await this.graphDB.addNodes(nodesWithEmbeddings);
+          logger.debug('Nodes added successfully with embeddings', { 
+            path: filePath, 
+            nodeCount: parsedFile.nodes.length 
+          });
+        }
+        
+        if (parsedFile.edges.length > 0) {
+          logger.info('EDGES DETECTED - Two-pass indexing needed', { 
+            path: filePath, 
+            edgeCount: parsedFile.edges.length,
+            edges: parsedFile.edges.slice(0, 3) // Log first 3 edges for debugging
+          });
+          
+          // Store edges for second pass processing
+          // We'll process these after ALL nodes have been indexed
+          this.pendingEdges.set(filePath, parsedFile.edges);
+          
+          logger.info('Edges stored for second pass', { 
+            path: filePath,
+            pendingEdgeFiles: this.pendingEdges.size
+          });
+        }
+        
+        logger.debug('Code structure indexed successfully', { 
+          path: filePath, 
+          nodes: parsedFile.nodes.length,
+          edges: parsedFile.edges.length,
+          imports: parsedFile.imports.length
+        });
+      } else {
+        logger.debug('No parsed code structure returned', { path: filePath });
+      }
+    } catch (error) {
+      logger.error('Failed to parse code structure', { 
+        path: filePath, 
+        error: {
+          message: error instanceof Error ? error.message : String(error),
+          stack: error instanceof Error ? error.stack : undefined,
+          name: error instanceof Error ? error.name : undefined
+        }
+      });
+      // Don't fail the entire indexing if code parsing fails
     }
   }
 
@@ -1188,6 +1722,228 @@ export class CamilleServer {
     const preview = meaningfulLines[0] || '';
     
     return `${basename} - ${ext.slice(1).toUpperCase() || 'text'} file with ${lines} lines, ${chars} chars. ${preview.substring(0, 100)}`;
+  }
+
+  /**
+   * Read the first line of a file
+   */
+  private async readFirstLine(filePath: string): Promise<string> {
+    const stream = fs.createReadStream(filePath, { encoding: 'utf8' });
+    
+    return new Promise((resolve, reject) => {
+      let firstLine = '';
+      
+      stream.on('data', (chunk) => {
+        const lines = chunk.toString().split('\n');
+        if (lines.length > 0) {
+          firstLine = lines[0];
+          stream.destroy();
+          resolve(firstLine);
+        }
+      });
+      
+      stream.on('error', reject);
+      stream.on('end', () => resolve(firstLine));
+    });
+  }
+
+  /**
+   * Find the project root directory by looking for common project indicators
+   */
+  private async findProjectRoot(startDir: string): Promise<string | undefined> {
+    try {
+      let currentDir = startDir;
+      const homeDir = os.homedir();
+      
+      // Don't go above home directory
+      while (currentDir.startsWith(homeDir) && currentDir !== homeDir) {
+        // Check for common project root indicators
+        const indicators = ['.git', 'package.json', 'Cargo.toml', 'go.mod', 'requirements.txt', 'pyproject.toml'];
+        
+        for (const indicator of indicators) {
+          const indicatorPath = path.join(currentDir, indicator);
+          if (fs.existsSync(indicatorPath)) {
+            return currentDir;
+          }
+        }
+        
+        // Move up one directory
+        const parentDir = path.dirname(currentDir);
+        if (parentDir === currentDir) {
+          break; // Reached root
+        }
+        currentDir = parentDir;
+      }
+      
+      return undefined;
+    } catch (error) {
+      logger.error('Error finding project root', { startDir, error });
+      return undefined;
+    }
+  }
+
+  /**
+   * Manually trigger second pass edge processing
+   * Useful for re-running edge creation after code parser fixes
+   */
+  public async triggerSecondPass(): Promise<void> {
+    logger.info('Manually triggering second pass edge processing');
+    
+    // First, we need to re-parse all indexed files to get updated edges
+    const indexedFiles = this.embeddingsIndex.getIndexedFiles();
+    logger.info(`Re-parsing ${indexedFiles.length} files for edge detection`);
+    
+    // Clear existing pending edges
+    this.pendingEdges.clear();
+    
+    // Re-parse each file to collect edges with the updated parser
+    for (const filePath of indexedFiles) {
+      try {
+        // Skip if not a code file that the parser can handle
+        if (!codeParser.canParse(filePath)) {
+          continue;
+        }
+        
+        const content = fs.readFileSync(filePath, 'utf8');
+        await this.parseAndIndexCodeStructure(filePath, content);
+      } catch (error) {
+        logger.error('Failed to re-parse file for edges', { filePath, error });
+      }
+    }
+    
+    // Now run the second pass
+    await this.processPendingEdges();
+  }
+
+  /**
+   * Index existing Claude transcripts on startup
+   */
+  private async indexExistingTranscripts(): Promise<void> {
+    try {
+      logger.info('Starting to index existing Claude transcripts');
+      
+      // Check if memory is enabled
+      const config = this.configManager.getConfig();
+      if (!config.memory?.enabled || !config.memory?.transcript?.enabled) {
+        logger.info('Memory system disabled, skipping transcript indexing');
+        return;
+      }
+
+      // Get the transcripts directory
+      const transcriptsDir = path.join(os.homedir(), '.claude', 'projects');
+      
+      if (!fs.existsSync(transcriptsDir)) {
+        logger.info('No Claude transcripts directory found');
+        return;
+      }
+
+      // Import the TranscriptProcessor and checkpoint manager
+      const { TranscriptProcessor } = await import('./memory/processors/transcript-processor.js');
+      const { TranscriptCheckpointManager } = await import('./memory/databases/transcript-checkpoint.js');
+      
+      const processor = new TranscriptProcessor();
+      const checkpointManager = new TranscriptCheckpointManager(
+        path.join(this.configManager.getConfigDir(), 'memory')
+      );
+
+      // Find all transcript files (they are .jsonl files in project directories)
+      const transcriptFiles = await glob('**/*.jsonl', {
+        cwd: transcriptsDir,
+        absolute: true
+      });
+
+      // Get checkpoint stats before processing
+      const statsBefore = checkpointManager.getStats();
+      logger.info(`Found ${transcriptFiles.length} transcript files. Already indexed: ${statsBefore.indexed}`);
+
+      // Process each transcript file
+      let processed = 0;
+      let skipped = 0;
+      let errors = 0;
+
+      for (const transcriptPath of transcriptFiles) {
+        try {
+          // Check if this transcript needs indexing
+          if (!checkpointManager.needsIndexing(transcriptPath)) {
+            skipped++;
+            logger.debug(`Skipping already indexed transcript: ${transcriptPath}`);
+            continue;
+          }
+
+          // Extract session ID from filename
+          const basename = path.basename(transcriptPath, '.jsonl');
+          const sessionId = basename;
+          
+          // Read the first line to get the project path (cwd)
+          const firstLine = await this.readFirstLine(transcriptPath);
+          let projectPath: string | undefined;
+          
+          try {
+            const firstEntry = JSON.parse(firstLine);
+            projectPath = firstEntry.cwd || firstEntry.project_path;
+          } catch (parseError) {
+            logger.warn('Could not parse first line of transcript to get project path', { transcriptPath });
+          }
+          
+          // If we couldn't get the project path from the file, try to infer it
+          if (!projectPath) {
+            // Extract from directory name (format: -Users-srao-camille -> /Users/srao/camille)
+            const dirName = path.basename(path.dirname(transcriptPath));
+            projectPath = dirName.replace(/^-/, '/').replace(/-/g, '/');
+          }
+
+          logger.info(`Indexing transcript for session ${sessionId} in project ${projectPath}`);
+
+          // Process the transcript
+          const result = await processor.processTranscript(
+            transcriptPath,
+            sessionId,
+            projectPath,
+            {
+              chunkSize: config.memory?.indexing?.chunkSize || 4000,
+              chunkOverlap: config.memory?.indexing?.chunkOverlap || 200,
+              embeddingModel: config.memory?.indexing?.embeddingModel || 'text-embedding-3-large'
+            }
+          );
+          
+          // Mark as indexed in checkpoint
+          checkpointManager.markIndexed(transcriptPath, result.chunks);
+          
+          processed++;
+          logger.info(`Indexed transcript: ${result.chunks} chunks, ${result.embeddings} embeddings`);
+        } catch (error) {
+          errors++;
+          logger.error('Failed to index transcript', { 
+            transcriptPath, 
+            error: error instanceof Error ? {
+              message: error.message,
+              stack: error.stack,
+              name: error.name
+            } : error
+          });
+        }
+      }
+
+      logger.info('Completed indexing existing transcripts', {
+        total: transcriptFiles.length,
+        processed,
+        skipped,
+        errors
+      });
+
+      const statsAfter = checkpointManager.getStats();
+      consoleOutput.info(chalk.green(`✅ Indexed ${processed} new transcripts, skipped ${skipped} already indexed`));
+      consoleOutput.info(chalk.gray(`Total indexed transcripts: ${statsAfter.indexed} with ${statsAfter.totalChunks} chunks`));
+      
+    } catch (error) {
+      logger.error('Failed to index existing transcripts', { 
+        error: error instanceof Error ? {
+          message: error.message,
+          stack: error.stack,
+          name: error.name
+        } : error
+      });
+    }
   }
 }
 

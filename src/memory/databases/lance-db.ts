@@ -205,6 +205,58 @@ export class LanceVectorDB implements VectorDB {
     this.table = undefined;
   }
 
+  /**
+   * Retrieve a specific chunk by its ID
+   */
+  async retrieveByChunkId(chunkId: string): Promise<SearchResult | null> {
+    if (!this.table) {
+      throw new Error('Not connected to database');
+    }
+
+    try {
+      logger.debug('Retrieving chunk by ID', { chunkId });
+      
+      // Get all records and filter by chunk ID
+      // LanceDB doesn't support direct metadata queries, so we need to scan all records
+      // First, create a dummy vector to satisfy the search requirement
+      // Using 3072 dimensions for text-embedding-3-large
+      const dummyVector = new Array(3072).fill(0);
+      
+      const results = await this.table
+        .search(dummyVector)
+        .limit(10000) // Get a large batch to search through
+        .toArray();
+      
+      // Find the specific chunk
+      const chunk = results.find((result: any) => {
+        try {
+          const data = JSON.parse(result.data || '{}');
+          return data.chunkId === chunkId;
+        } catch (e) {
+          return false;
+        }
+      });
+      
+      if (!chunk) {
+        return null;
+      }
+      
+      const data = JSON.parse(chunk.data || '{}');
+      return {
+        id: chunk.id,
+        score: 1.0, // Perfect match for direct retrieval
+        metadata: data,
+        content: data.content || ''
+      };
+    } catch (error) {
+      logger.error('Failed to retrieve chunk by ID', { 
+        error: error instanceof Error ? error.message : error,
+        chunkId 
+      });
+      throw error;
+    }
+  }
+
   private async ensureDirectoryExists(): Promise<void> {
     try {
       await fs.mkdir(this.dbPath, { recursive: true });

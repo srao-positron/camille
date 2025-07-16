@@ -11,10 +11,8 @@ import { logger } from '../logger.js';
 
 export interface CodeSearchOptions {
   limit?: number;
-  includeGraph?: boolean;
-  includeVector?: boolean;
   includeDependencies?: boolean;
-  searchMode?: 'vector' | 'graph' | 'unified';
+  directory?: string;
 }
 
 export interface DependencyInfo {
@@ -67,34 +65,27 @@ export class CodeUnifiedSearch {
   async search(query: string, options: CodeSearchOptions = {}): Promise<EnhancedSearchResult[]> {
     const {
       limit = 10,
-      includeGraph = true,
-      includeVector = true,
       includeDependencies = true,
-      searchMode = 'unified'
+      directory
     } = options;
 
+    logger.info('🔍 UnifiedSearch.search START', { 
+      query, 
+      directory,
+      limit 
+    });
+
     try {
-      let results: EnhancedSearchResult[] = [];
+      // Perform vector search using embeddings
+      logger.info('📊 Starting vector search', { query, limit });
+      let results = await this.performVectorSearch(query, limit);
+      logger.info('📊 Vector search complete', { resultCount: results.length });
 
-      if (searchMode === 'vector' || searchMode === 'unified') {
-        // Vector search using embeddings
-        if (includeVector) {
-          results = await this.performVectorSearch(query, limit);
-        }
-      }
-
-      if (searchMode === 'graph' || searchMode === 'unified') {
-        // Graph search for code structure
-        if (includeGraph) {
-          const graphResults = await this.performGraphSearch(query, limit);
-          
-          if (searchMode === 'graph') {
-            results = graphResults;
-          } else {
-            // Merge with vector results
-            results = this.mergeResults(results, graphResults, limit);
-          }
-        }
+      // Apply directory filter to all results
+      if (directory) {
+        results = results.filter(result => 
+          result.path.toLowerCase().includes(directory.toLowerCase())
+        );
       }
 
       // Enhance results with dependency information
@@ -102,9 +93,14 @@ export class CodeUnifiedSearch {
         results = await this.enhanceWithDependencies(results);
       }
 
+      logger.info('🔍 UnifiedSearch.search END', { 
+        query,
+        finalResultCount: results.length,
+        limitApplied: limit
+      });
       return results.slice(0, limit);
     } catch (error) {
-      logger.error('Unified search failed', { query, error });
+      logger.error('❌ Unified search failed', { query, error });
       // Fallback to vector search only
       return this.performVectorSearch(query, limit);
     }
@@ -125,71 +121,157 @@ export class CodeUnifiedSearch {
   }
 
   /**
+   * Convert natural language query to Cypher using OpenAI
+   */
+  private async text2Cypher(query: string, directory?: string): Promise<string> {
+    logger.info('🧠 text2Cypher START', { query, directory });
+    
+    try {
+      // Get the graph schema
+      const schema = await this.graphDB.getSchema();
+      logger.info('📜 Got graph schema', { schemaLength: schema.length });
+      
+      const directoryClause = directory ? ` AND n.file =~ '.*${directory}.*'` : '';
+      
+      const prompt = `You are an expert at converting natural language queries to Cypher queries for a code graph database.
+
+Given the following schema:
+${schema}
+
+Convert this natural language query to a Cypher query:
+"${query}"${directory ? `\nLimit results to files in directory: ${directory}` : ''}
+
+Important guidelines:
+1. Use MATCH patterns to find nodes and relationships
+2. Use WHERE clauses for filtering
+3. Return relevant nodes with their properties
+4. Include relationship patterns when the query asks about dependencies, calls, imports, etc.
+5. Limit results to 10 unless specified otherwise
+6. For function calls, use the CALLS relationship
+7. For inheritance, use EXTENDS or IMPLEMENTS relationships
+8. For imports, use the IMPORTS relationship
+${directory ? `9. Add WHERE clause to filter by directory: WHERE n.file =~ '.*${directory}.*'` : ''}
+
+Examples:
+- "functions that call escapeForCypher" -> MATCH (n:CodeObject)-[:CALLS]->(m:CodeObject {name: 'escapeForCypher'}) WHERE n.type = 'function'${directoryClause} RETURN n LIMIT 10
+- "classes that extend BaseClass" -> MATCH (n:CodeObject {type: 'class'})-[:EXTENDS]->(m:CodeObject {name: 'BaseClass'})${directoryClause ? ' WHERE n.file =~ \'.*' + directory + '.*\'' : ''} RETURN n LIMIT 10
+- "all functions in server.ts" -> MATCH (n:CodeObject {type: 'function'}) WHERE n.file =~ '.*server.ts$'${directoryClause} RETURN n LIMIT 10
+
+Return ONLY the Cypher query, no explanation.`;
+
+      logger.info('🤖 Calling OpenAI for Text2Cypher', { model: 'gpt-4o-mini', promptLength: prompt.length });
+      
+      // Use GPT-4o-mini for Text2Cypher conversion
+      const response = await this.openaiClient.complete(prompt, 'gpt-4o-mini');
+      
+      // Strip markdown code blocks if present
+      let cypherQuery = response.trim();
+      if (cypherQuery.startsWith('```')) {
+        // Remove opening code block
+        cypherQuery = cypherQuery.replace(/^```(?:cypher|sql)?\n?/, '');
+        // Remove closing code block
+        cypherQuery = cypherQuery.replace(/\n?```$/, '');
+        cypherQuery = cypherQuery.trim();
+      }
+      
+      logger.info('✅ text2Cypher SUCCESS', { 
+        originalQuery: query,
+        generatedCypher: cypherQuery,
+        directory 
+      });
+      
+      return cypherQuery;
+    } catch (error) {
+      logger.error('❌ text2Cypher FAILED', { error, query });
+      // Fallback to basic pattern matching with directory filter
+      const directoryFilter = directory ? ` AND n.file =~ '.*${directory}.*'` : '';
+      return `MATCH (n:CodeObject) WHERE n.name =~ '.*${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*'${directoryFilter} RETURN n LIMIT 10`;
+    }
+  }
+
+  /**
    * Perform graph search for code structure
    */
-  private async performGraphSearch(query: string, limit: number): Promise<EnhancedSearchResult[]> {
+  private async performGraphSearch(query: string, limit: number, directory?: string): Promise<EnhancedSearchResult[]> {
+    logger.info('🔗 performGraphSearch START', { query, limit, directory });
     const results: EnhancedSearchResult[] = [];
 
     try {
-      // Search for nodes by name patterns
-      const queryTerms = query.toLowerCase().split(/\s+/);
+      // Convert natural language to Cypher
+      const cypherQuery = await this.text2Cypher(query, directory);
+      logger.info('🔍 Executing Cypher query', { cypherQuery });
       
-      for (const term of queryTerms) {
-        // Find functions matching the term
-        const functionNodes = await this.graphDB.findNodes('function', `*${term}*`);
-        for (const node of functionNodes.slice(0, Math.ceil(limit / 2))) {
-          const relationships = await this.graphDB.getRelationships(node.id);
-          
+      // Execute the Cypher query
+      const queryResults = await this.graphDB.query(cypherQuery);
+      logger.info('📊 Cypher query results', { 
+        resultCount: queryResults.length,
+        firstResult: queryResults[0] || 'none'
+      });
+      
+      // Process results
+      logger.info('📦 Processing query results', { 
+        rawResultCount: queryResults.length,
+        firstRawResult: queryResults[0] ? JSON.stringify(queryResults[0]).substring(0, 200) : 'none'
+      });
+      
+      // Process all nodes at once without individual relationship queries
+      for (const result of queryResults.slice(0, limit)) {
+        const node = result.n || result; // Handle different result formats
+        
+        logger.debug('🔍 Processing node', { 
+          hasNode: !!node,
+          nodeId: node?.id,
+          nodeFile: node?.file,
+          nodeName: node?.name,
+          nodeType: node?.type
+        });
+        
+        if (node && node.id) {
           // Try to get the file content for this node
           const fileContent = this.getFileContentFromEmbeddings(node.file);
-          if (fileContent) {
-            results.push({
-              path: node.file,
-              similarity: 0.8, // Default similarity for graph matches
-              content: fileContent.content,
-              summary: fileContent.summary || `Contains ${node.type}: ${node.name}`,
-              lineMatches: [{
-                lineNumber: node.line,
-                line: `${node.type} ${node.name}`,
-                snippet: this.createSnippetForNode(node, fileContent.content)
-              }],
-              graphMatches: [{
-                node,
-                relationships
-              }]
-            });
-          }
-        }
-
-        // Find classes matching the term
-        const classNodes = await this.graphDB.findNodes('class', `*${term}*`);
-        for (const node of classNodes.slice(0, Math.ceil(limit / 2))) {
-          const relationships = await this.graphDB.getRelationships(node.id);
+          logger.debug('📄 File content check', { 
+            file: node.file,
+            hasContent: !!fileContent 
+          });
           
-          const fileContent = this.getFileContentFromEmbeddings(node.file);
-          if (fileContent) {
-            results.push({
-              path: node.file,
-              similarity: 0.8,
-              content: fileContent.content,
-              summary: fileContent.summary || `Contains ${node.type}: ${node.name}`,
-              lineMatches: [{
-                lineNumber: node.line,
-                line: `${node.type} ${node.name}`,
-                snippet: this.createSnippetForNode(node, fileContent.content)
-              }],
-              graphMatches: [{
-                node,
-                relationships
-              }]
-            });
-          }
+          // Create result without fetching relationships for each node
+          // This avoids the N+1 query problem
+          results.push({
+            path: node.file,
+            similarity: 0.8,
+            content: fileContent?.content || `// ${node.type} ${node.name} at line ${node.line}`,
+            summary: fileContent?.summary || `Contains ${node.type}: ${node.name}`,
+            lineMatches: [{
+              lineNumber: node.line,
+              line: `${node.type} ${node.name}`,
+              snippet: fileContent ? this.createSnippetForNode(node, fileContent.content) : `${node.type} ${node.name}`
+            }],
+            graphMatches: [{
+              node,
+              relationships: { edges: [], nodes: [] } // Empty relationships to avoid fetching
+            }]
+          });
+          
+          logger.debug('✅ Added result', { 
+            path: node.file,
+            resultCount: results.length 
+          });
         }
       }
 
+      logger.info('🔗 performGraphSearch END', { 
+        query,
+        resultCount: results.length 
+      });
       return results;
     } catch (error) {
-      logger.error('Graph search failed', { query, error });
+      logger.error('❌ performGraphSearch FAILED', { 
+        query, 
+        error: error instanceof Error ? {
+          message: error.message,
+          stack: error.stack?.split('\n').slice(0, 5).join('\n')
+        } : error 
+      });
       return [];
     }
   }
@@ -248,51 +330,64 @@ export class CodeUnifiedSearch {
     };
 
     try {
-      // Find all nodes in this file
-      const fileNodes = await this.graphDB.findNodes(undefined, undefined); // This needs a better query
-      const nodesInFile = fileNodes.filter((node: CodeNode) => node.file === filePath);
+      // Query nodes directly from this file using Cypher
+      const fileQuery = `MATCH (n:CodeObject) WHERE n.file = '${filePath.replace(/'/g, "''")}' RETURN n`;
+      const fileResults = await this.graphDB.query(fileQuery);
+      const nodesInFile = fileResults.map((result: any) => result.n).filter(Boolean);
 
-      for (const node of nodesInFile) {
-        const relationships = await this.graphDB.getRelationships(node.id, 'out');
+      // Get all relationships for nodes in this file with a single query
+      if (nodesInFile.length > 0) {
+        // Query outgoing relationships (imports and calls)
+        const nodeIds = nodesInFile.map((n: any) => `'${n.id}'`).join(', ');
+        const outQuery = `MATCH (n:CodeObject)-[r]->(m:CodeObject) WHERE n.id IN [${nodeIds}] RETURN n, r, m`;
+        const outResults = await this.graphDB.query(outQuery);
         
-        for (const edge of relationships.edges) {
-          switch (edge.relationship) {
+        for (const result of outResults) {
+          const edge = result.r;
+          const targetNode = result.m;
+          
+          switch (edge.label) {
             case 'imports':
-              const targetNode = relationships.nodes.find((n: CodeNode) => n.id === edge.target);
               if (targetNode) {
                 dependencies.imports.push(targetNode.name);
               }
               break;
             case 'calls':
-              const calledNode = relationships.nodes.find((n: CodeNode) => n.id === edge.target);
-              if (calledNode) {
+              if (targetNode) {
                 dependencies.calls.push({
-                  function: calledNode.name,
-                  location: `${calledNode.file}:${calledNode.line}`
+                  function: targetNode.name,
+                  location: `${targetNode.file}:${targetNode.line}`
                 });
               }
               break;
           }
         }
-
-        // Find what uses this node
-        const incomingRels = await this.graphDB.getRelationships(node.id, 'in');
-        for (const edge of incomingRels.edges) {
-          if (edge.relationship === 'calls') {
-            const callerNode = incomingRels.nodes.find((n: CodeNode) => n.id === edge.source);
-            if (callerNode && callerNode.file !== filePath) {
-              dependencies.usedBy.push({
-                file: callerNode.file,
-                function: callerNode.name
-              });
-            }
+        
+        // Query incoming relationships (who calls us) - only from other files
+        const inQuery = `MATCH (m:CodeObject)-[r:calls]->(n:CodeObject) WHERE n.id IN [${nodeIds}] AND m.file <> '${filePath.replace(/'/g, "''")}' RETURN m`;
+        const inResults = await this.graphDB.query(inQuery);
+        
+        for (const result of inResults) {
+          const callerNode = result.m;
+          if (callerNode) {
+            dependencies.usedBy.push({
+              file: callerNode.file,
+              function: callerNode.name
+            });
           }
         }
       }
 
       return dependencies;
     } catch (error) {
-      logger.error('Failed to extract dependencies from graph', { filePath, error });
+      logger.error('Failed to extract dependencies from graph', { 
+        filePath, 
+        error: error instanceof Error ? {
+          message: error.message,
+          stack: error.stack,
+          name: error.name
+        } : error 
+      });
       return dependencies;
     }
   }

@@ -69,8 +69,9 @@ const server = program
 server
   .command('start')
   .description('Start the Camille server with file watching and indexing')
-  .option('-d, --directory <path...>', 'Directories to watch and index (can specify multiple)')
+  .option('-d, --directory <path...>', 'Directories to watch (ignored - uses config)', [])
   .option('-q, --quiet', 'Suppress console output (daemon mode)', false)
+  .option('--mcp', 'Enable MCP server mode (always enabled)', true)
   .action(async (options) => {
     try {
       // Check if running as root
@@ -82,28 +83,21 @@ server
         process.exit(1);
       }
       
-      // Determine which directories to watch
+      // Always use configured directories
+      const configManager = new ConfigManager();
+      const config = configManager.getConfig();
       let directoriesToWatch: string[];
       
-      if (options.directory && options.directory.length > 0) {
-        // Use explicitly provided directories
-        directoriesToWatch = options.directory;
+      if (config.watchedDirectories && config.watchedDirectories.length > 0) {
+        directoriesToWatch = config.watchedDirectories;
+        if (!options.quiet) {
+          console.log(chalk.gray('Using configured directories from ~/.camille/config.json'));
+        }
       } else {
-        // Try to use configured directories
-        const configManager = new ConfigManager();
-        const config = configManager.getConfig();
-        
-        if (config.watchedDirectories && config.watchedDirectories.length > 0) {
-          directoriesToWatch = config.watchedDirectories;
-          if (!options.quiet) {
-            console.log(chalk.gray('Using configured directories from ~/.camille/config.json'));
-          }
-        } else {
-          // Fall back to current directory
-          directoriesToWatch = [process.cwd()];
-          if (!options.quiet) {
-            console.log(chalk.gray('No directories configured, using current directory'));
-          }
+        // Fall back to current directory
+        directoriesToWatch = [process.cwd()];
+        if (!options.quiet) {
+          console.log(chalk.gray('No directories configured, using current directory'));
         }
       }
       
@@ -170,6 +164,64 @@ server
       await ServerManager.stop();
     } catch (error) {
       console.error(chalk.red('Error:', error));
+      process.exit(1);
+    }
+  });
+
+server
+  .command('reindex-edges')
+  .description('Re-parse all files and run second pass edge processing')
+  .action(async () => {
+    try {
+      // Use the API endpoint to trigger re-indexing
+      const http = await import('http');
+      
+      const data = await new Promise<any>((resolve, reject) => {
+        const req = http.request({
+          hostname: 'localhost',
+          port: 3456,
+          path: '/api/reindex-edges',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' }
+        }, (res) => {
+          let body = '';
+          res.on('data', (chunk) => body += chunk);
+          res.on('end', () => {
+            try {
+              const result = JSON.parse(body);
+              if (res.statusCode && res.statusCode >= 400) {
+                reject(new Error(result.error || `HTTP ${res.statusCode}`));
+              } else {
+                resolve(result);
+              }
+            } catch (e) {
+              reject(e);
+            }
+          });
+        });
+        
+        req.on('error', (err) => {
+          if ((err as any).code === 'ECONNREFUSED') {
+            const customErr = new Error('Connection refused');
+            (customErr as any).code = 'ECONNREFUSED';
+            reject(customErr);
+          } else {
+            reject(err);
+          }
+        });
+        
+        req.end();
+      });
+      
+      console.log(chalk.blue(data.message));
+      console.log(chalk.gray('Check server logs for progress...'));
+    } catch (error: any) {
+      if (error.code === 'ECONNREFUSED') {
+        console.error(chalk.red('Error: Could not connect to Camille API server on port 3456'));
+        console.error(chalk.yellow('Make sure the server is running with "camille server start"'));
+      } else {
+        console.error(chalk.red('Error:', error.message));
+      }
       process.exit(1);
     }
   });
@@ -766,4 +818,4 @@ checkFirstRun().then(() => {
   logger.error('CLI error', error);
   console.error(chalk.red('Error:', error));
   process.exit(1);
-});
+});// test comment

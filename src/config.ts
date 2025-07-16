@@ -248,6 +248,13 @@ export class ConfigManager {
   }
 
   /**
+   * Gets the config directory
+   */
+  public getConfigDir(): string {
+    return this.configDir;
+  }
+
+  /**
    * Loads custom prompt from file
    */
   public loadCustomPrompt(name: string): string | undefined {

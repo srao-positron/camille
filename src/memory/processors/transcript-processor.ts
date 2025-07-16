@@ -48,9 +48,9 @@ export class TranscriptProcessor {
   private openAI: OpenAIClient;
   private config: ConfigManager;
   private defaultOptions: ProcessingOptions = {
-    chunkSize: 4000,          // ~1000 tokens
-    chunkOverlap: 200,        // ~50 tokens overlap
-    maxChunkMessages: 20,     // Max 20 messages per chunk
+    chunkSize: 2000,          // ~500 tokens (more conservative to avoid hitting limits)
+    chunkOverlap: 100,        // ~25 tokens overlap
+    maxChunkMessages: 10,     // Max 10 messages per chunk (reduced from 20)
     embeddingModel: 'text-embedding-3-large'
   };
 
@@ -160,13 +160,32 @@ export class TranscriptProcessor {
       for (const line of lines) {
         try {
           const data = JSON.parse(line);
-          if (data.role && data.content) {
-            messages.push({
-              timestamp: data.timestamp || new Date().toISOString(),
-              role: data.role,
-              content: data.content,
-              metadata: data.metadata || {}
-            });
+          // Handle both direct and nested message structures
+          const message = data.message || data;
+          if (message.role && message.content) {
+            // Extract text content - handle both string and array formats
+            let textContent: string;
+            if (typeof message.content === 'string') {
+              textContent = message.content;
+            } else if (Array.isArray(message.content)) {
+              // Claude format: content is array of {type, text} objects
+              textContent = message.content
+                .filter((c: any) => c.type === 'text' && c.text)
+                .map((c: any) => c.text)
+                .join('\n');
+            } else {
+              textContent = JSON.stringify(message.content);
+            }
+            
+            // Only add if there's actual content
+            if (textContent && textContent.trim()) {
+              messages.push({
+                timestamp: data.timestamp || new Date().toISOString(),
+                role: message.role,
+                content: textContent,
+                metadata: data.metadata || {}
+              });
+            }
           }
         } catch (parseError) {
           logger.debug('Skipping malformed line', { line, error: parseError });
@@ -193,16 +212,28 @@ export class TranscriptProcessor {
     let currentChunk: Message[] = [];
     let currentLength = 0;
     
-    for (let i = 0; i < messages.length; i++) {
-      const message = messages[i];
-      const messageLength = message.content.length;
+    // First, split any messages that are too large
+    const processedMessages: Message[] = [];
+    for (const message of messages) {
+      if (message.content.length > options.chunkSize!) {
+        // Split large message into smaller parts
+        const parts = this.splitLargeMessage(message, options.chunkSize!);
+        processedMessages.push(...parts);
+      } else {
+        processedMessages.push(message);
+      }
+    }
+    
+    for (let i = 0; i < processedMessages.length; i++) {
+      const message = processedMessages[i];
+      const messageLength = message.content ? message.content.length : 0;
       
       // Check if we should start a new chunk
       const shouldSplit = 
         currentLength + messageLength > options.chunkSize! ||
         currentChunk.length >= options.maxChunkMessages! ||
-        this.isTopicBoundary(message, messages[i - 1]) ||
-        this.hasTimeGap(message, messages[i - 1]);
+        this.isTopicBoundary(message, processedMessages[i - 1]) ||
+        this.hasTimeGap(message, processedMessages[i - 1]);
       
       if (shouldSplit && currentChunk.length > 0) {
         // Create chunk from current messages
@@ -234,6 +265,86 @@ export class TranscriptProcessor {
     }
     
     return chunks;
+  }
+
+  /**
+   * Split a large message into smaller parts
+   */
+  private splitLargeMessage(message: Message, maxSize: number): Message[] {
+    const parts: Message[] = [];
+    const content = message.content;
+    
+    // Leave some room for safety - use 80% of max size to be extra conservative
+    const safeSize = Math.floor(maxSize * 0.8);
+    
+    // Split by paragraphs first, then by sentences if needed
+    const paragraphs = content.split('\n\n');
+    let currentPart = '';
+    
+    for (const paragraph of paragraphs) {
+      if (paragraph.length > safeSize) {
+        // Split by sentences if paragraph is too large
+        const sentences = paragraph.match(/[^.!?]+[.!?]+/g) || [paragraph];
+        
+        for (const sentence of sentences) {
+          if (currentPart.length + sentence.length > safeSize && currentPart.length > 0) {
+            parts.push({
+              ...message,
+              content: currentPart.trim()
+            });
+            currentPart = sentence;
+          } else if (sentence.length > safeSize) {
+            // If a single sentence is too long, split by words
+            if (currentPart.length > 0) {
+              parts.push({
+                ...message,
+                content: currentPart.trim()
+              });
+              currentPart = '';
+            }
+            
+            const words = sentence.split(' ');
+            for (const word of words) {
+              if (currentPart.length + word.length + 1 > safeSize && currentPart.length > 0) {
+                parts.push({
+                  ...message,
+                  content: currentPart.trim()
+                });
+                currentPart = word;
+              } else {
+                currentPart += (currentPart.length > 0 ? ' ' : '') + word;
+              }
+            }
+          } else {
+            currentPart += sentence;
+          }
+        }
+      } else if (currentPart.length + paragraph.length + 2 > safeSize && currentPart.length > 0) {
+        parts.push({
+          ...message,
+          content: currentPart.trim()
+        });
+        currentPart = paragraph;
+      } else {
+        currentPart += (currentPart.length > 0 ? '\n\n' : '') + paragraph;
+      }
+    }
+    
+    // Don't forget the last part
+    if (currentPart.length > 0) {
+      parts.push({
+        ...message,
+        content: currentPart.trim()
+      });
+    }
+    
+    logger.info(`Split large message into ${parts.length} parts`, {
+      originalLength: content.length,
+      maxSize,
+      partLengths: parts.map(p => p.content.length)
+    });
+    
+    return parts;
   }
 
   /**

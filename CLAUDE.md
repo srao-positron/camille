@@ -225,6 +225,16 @@ Follow conventional commits:
 6. **Type Safety**: Ensure full TypeScript compliance
 7. **Claude Code Focus**: Always reference "Claude Code" not "Claude Desktop" in all contexts
 
+## Server Management
+
+To restart the Camille server after making changes, use the provided restart script:
+```bash
+~/camille/restart.sh
+```
+This script handles proper shutdown and restart of all server components including clearing cache and locks.
+
+**IMPORTANT**: After restarting the Camille server, Claude Code must be restarted to re-establish the MCP connection. The server restart breaks the existing MCP pipe connection.
+
 ### Memory Tool Usage Examples
 
 Before implementing any feature, search for context:

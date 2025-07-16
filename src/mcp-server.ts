@@ -26,12 +26,15 @@ export const TOOLS = {
    */
   searchCode: {
     name: 'search_code',
-    description: `Search for code files in the repository using semantic similarity.
+    description: `Search for code files in the repository using semantic similarity (vector search).
 
 ## Overview
 This tool uses OpenAI embeddings to find files that are semantically similar to your query.
-It searches through the entire indexed codebase and returns the most relevant files based on
-conceptual similarity, not just keyword matching.
+It searches through the entire indexed codebase using vector embeddings and returns the most 
+relevant files based on conceptual similarity, not just keyword matching.
+
+Note: For graph-based searches of code relationships (dependencies, calls, inheritance), 
+use the 'graph_query' tool with Cypher queries instead.
 
 ## When to Use This Tool
 1. **Before making changes** - Find all files that might be affected
@@ -137,21 +140,14 @@ Expected results:
           description: 'Maximum number of results to return (default: 10)',
           default: 10
         },
-        searchMode: {
-          type: 'string',
-          enum: ['vector', 'graph', 'unified'],
-          description: 'Search strategy: vector (semantic embeddings), graph (code structure), or unified (both)',
-          default: 'unified'
-        },
-        includeGraph: {
-          type: 'boolean',
-          description: 'Include graph-based search results showing code relationships',
-          default: true
-        },
         includeDependencies: {
           type: 'boolean',
           description: 'Include dependency information (imports, calls, inheritance) in results',
           default: true
+        },
+        directory: {
+          type: 'string',
+          description: 'Limit results to files within this directory path (supports partial matching, e.g., "src/memory" matches all files in that path)'
         }
       },
       required: ['query']
@@ -564,6 +560,107 @@ retrieve_memory_chunk(chunk_id: "session123-chunk-5")`,
       },
       required: ['chunk_id']
     }
+  },
+
+  /**
+   * Execute Cypher queries on the code graph database
+   */
+  graphQuery: {
+    name: 'graph_query',
+    description: `Execute Cypher queries on the code graph database to find relationships and patterns.
+
+## Overview
+This tool allows you to query the code structure graph using Cypher query language.
+The graph contains nodes representing code objects (functions, classes, modules) and 
+edges representing relationships (calls, imports, extends, implements).
+
+## When to Use This Tool
+1. **Finding dependencies** - What functions call a specific function?
+2. **Understanding inheritance** - What classes extend a base class?
+3. **Import analysis** - What modules import a specific module?
+4. **Call graphs** - Trace function calls through the codebase
+5. **Architecture analysis** - Find patterns in code structure
+
+## Node Schema (CodeObject)
+- id: Unique identifier (string)
+- name: Function/class/module name (string)
+- type: Code object type (string) - 'function' | 'class' | 'module' | 'interface' | 'method' | 'property'
+- file: File path (string)
+- line: Line number where defined (integer)
+- col: Column number (integer)
+- metadata: JSON string with additional properties (params, returns, visibility, etc.)
+- name_embedding: Vector embedding of the name (array of floats, optional)
+- summary_embedding: Vector embedding of the summary (array of floats, optional)
+
+## Relationship Types
+- CALLS: Function/method calls another function/method
+- IMPORTS: Module imports another module
+- EXTENDS: Class extends another class
+- IMPLEMENTS: Class implements an interface
+- USES: General usage relationship
+- HAS_METHOD: Class has a method
+- HAS_PROPERTY: Class has a property
+- RETURNS: Function returns a type
+- ACCEPTS: Function accepts a parameter type
+
+## Example Queries
+
+### Find functions that call a specific function
+\`\`\`cypher
+MATCH (n:CodeObject)-[:CALLS]->(m:CodeObject {name: 'validateUser'})
+WHERE n.type = 'function'
+RETURN n.name, n.file, n.line
+LIMIT 10
+\`\`\`
+
+### Find all classes that extend a base class
+\`\`\`cypher
+MATCH (n:CodeObject {type: 'class'})-[:EXTENDS]->(m:CodeObject {name: 'BaseController'})
+RETURN n.name, n.file
+\`\`\`
+
+### Find import dependencies of a module
+\`\`\`cypher
+MATCH (n:CodeObject {file: 'src/auth/login.ts'})-[:IMPORTS]->(m:CodeObject)
+RETURN m.name, m.file
+\`\`\`
+
+### Find all functions in a specific file
+\`\`\`cypher
+MATCH (n:CodeObject {type: 'function'})
+WHERE n.file =~ '.*server\\.ts$'
+RETURN n.name, n.line
+ORDER BY n.line
+\`\`\`
+
+### Find circular dependencies
+\`\`\`cypher
+MATCH (a:CodeObject)-[:IMPORTS]->(b:CodeObject)-[:IMPORTS]->(a)
+RETURN a.file, b.file
+LIMIT 5
+\`\`\`
+
+## Pro Tips
+- Use LIMIT to control result size
+- Use WHERE clauses to filter results
+- Property names are case-sensitive
+- Use =~ for regex pattern matching
+- Escape single quotes in strings by doubling them`,
+    inputSchema: {
+      type: 'object',
+      properties: {
+        query: {
+          type: 'string',
+          description: 'The Cypher query to execute'
+        },
+        explain: {
+          type: 'boolean',
+          description: 'If true, explain the query plan without executing',
+          default: false
+        }
+      },
+      required: ['query']
+    }
   }
 };
 
@@ -942,18 +1039,14 @@ export class CamilleMCPServer {
       }
 
       // Create vector database instance to retrieve by chunk ID
-      const vectorDB = new LanceVectorDB();
+      const vectorDB = new LanceVectorDB('transcripts');
       await vectorDB.connect();
 
       try {
-        // Search for the specific chunk by ID
-        const results = await vectorDB.search(
-          new Array(3072).fill(0), // Dummy embedding for metadata search
-          100, // Get more results to find the specific chunk
-          { chunkId: chunk_id }
-        );
+        // Retrieve the specific chunk by ID
+        const chunk = await vectorDB.retrieveByChunkId(chunk_id);
 
-        if (results.length === 0) {
+        if (!chunk) {
           const notFoundMessage = `Chunk not found: ${chunk_id}\n\nMake sure you're using a valid chunk ID from search results.`;
           return {
             content: [{
@@ -963,9 +1056,6 @@ export class CamilleMCPServer {
             error: 'Chunk not found'
           };
         }
-
-        // Get the first matching result
-        const chunk = results[0];
         
         // Format the full chunk content
         let textSummary = `## Memory Chunk: ${chunk_id}\n\n`;

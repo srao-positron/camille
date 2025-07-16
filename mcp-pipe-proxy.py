@@ -20,9 +20,15 @@ import os
 import platform
 import datetime
 import traceback
+import time
 
 # Log file for proxy debugging
 LOG_FILE = '/tmp/camille-proxy.log'
+
+# Reconnection settings
+MAX_RECONNECT_ATTEMPTS = 5
+INITIAL_RECONNECT_DELAY = 0.5  # seconds
+MAX_RECONNECT_DELAY = 10.0  # seconds
 
 def log(message, data=None):
     """Write timestamped log entry to file."""
@@ -70,6 +76,19 @@ def send_error(message, id=None):
     log(f"SENDING ERROR TO CLAUDE CODE: {message}", error)
     send_response(error)
 
+def connect_to_pipe(pipe_path, timeout=5.0):
+    """Connect to the named pipe with timeout."""
+    try:
+        log(f"CONNECTING TO UNIX SOCKET: {pipe_path}")
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
+        client.settimeout(timeout)
+        client.connect(pipe_path)
+        log("CONNECTED TO PIPE SUCCESSFULLY")
+        return client
+    except Exception as e:
+        log(f"PIPE CONNECTION ERROR: {str(e)}", {"traceback": traceback.format_exc()})
+        return None
+
 def forward_to_pipe(client, request):
     """Forward a request to the named pipe and return the response."""
     try:
@@ -79,43 +98,62 @@ def forward_to_pipe(client, request):
         client.sendall(request_line.encode('utf-8'))
         log(f"SENT TO PIPE: {len(request_line)} bytes")
         
-        # Read response
+        # Read response with timeout
+        client.settimeout(30.0)  # 30 second timeout for response
         response_data = b''
         chunks_received = 0
+        
         while True:
-            chunk = client.recv(4096)
-            chunks_received += 1
-            if not chunk:
-                log(f"PIPE CLOSED after {chunks_received} chunks")
-                raise ConnectionError("Pipe connection closed")
-            
-            response_data += chunk
-            log(f"RECEIVED CHUNK {chunks_received}: {len(chunk)} bytes, total: {len(response_data)} bytes")
-            
-            # Check if we have a complete line
-            if b'\n' in response_data:
-                lines = response_data.split(b'\n')
-                response_line = lines[0]
+            try:
+                chunk = client.recv(4096)
+                chunks_received += 1
                 
-                try:
-                    response = json.loads(response_line.decode('utf-8'))
-                    log(f"PARSED RESPONSE FROM PIPE", response)
-                    return response
-                except json.JSONDecodeError as e:
-                    log(f"JSON DECODE ERROR: {e}, line: {response_line[:100]}")
-                    # Keep reading if JSON is incomplete
-                    continue
+                if not chunk:
+                    log(f"PIPE CLOSED after {chunks_received} chunks")
+                    raise ConnectionError("Pipe connection closed")
+                
+                response_data += chunk
+                log(f"RECEIVED CHUNK {chunks_received}: {len(chunk)} bytes, total: {len(response_data)} bytes")
+                
+                # Check if we have a complete line
+                if b'\n' in response_data:
+                    lines = response_data.split(b'\n')
+                    response_line = lines[0]
                     
+                    try:
+                        response = json.loads(response_line.decode('utf-8'))
+                        log(f"PARSED RESPONSE FROM PIPE", response)
+                        return response
+                    except json.JSONDecodeError as e:
+                        log(f"JSON DECODE ERROR: {e}, line: {response_line[:100]}")
+                        # Keep reading if JSON is incomplete
+                        continue
+                        
+            except socket.timeout:
+                log("SOCKET TIMEOUT while reading response")
+                raise ConnectionError("Timeout waiting for response from Camille server")
+                
     except Exception as e:
         log(f"PIPE ERROR: {str(e)}", {"traceback": traceback.format_exc()})
-        return {
-            "jsonrpc": "2.0",
-            "error": {
-                "code": -32603,
-                "message": f"Pipe communication error: {str(e)}"
-            },
-            "id": request.get('id')
-        }
+        raise
+
+def reconnect_with_backoff(pipe_path, attempt=0):
+    """Attempt to reconnect with exponential backoff."""
+    if attempt >= MAX_RECONNECT_ATTEMPTS:
+        log(f"MAX RECONNECTION ATTEMPTS ({MAX_RECONNECT_ATTEMPTS}) REACHED")
+        return None
+    
+    if attempt > 0:
+        delay = min(INITIAL_RECONNECT_DELAY * (2 ** (attempt - 1)), MAX_RECONNECT_DELAY)
+        log(f"WAITING {delay:.1f}s BEFORE RECONNECT ATTEMPT #{attempt + 1}")
+        time.sleep(delay)
+    
+    client = connect_to_pipe(pipe_path)
+    if client:
+        return client
+    
+    # Recursive retry with increased attempt count
+    return reconnect_with_backoff(pipe_path, attempt + 1)
 
 def main():
     """Main proxy loop."""
@@ -151,54 +189,72 @@ def main():
                 send_error("Invalid JSON request")
                 continue
             
-            # Connect to pipe if not connected
-            if not client:
-                log("NOT CONNECTED TO PIPE, ATTEMPTING CONNECTION...")
+            # Check if the pipe exists
+            if not os.path.exists(pipe_path):
+                log(f"PIPE DOES NOT EXIST: {pipe_path}")
                 
-                # Check if the pipe exists
-                if not os.path.exists(pipe_path):
-                    log(f"PIPE DOES NOT EXIST: {pipe_path}")
-                    
-                    # Check for permission issues
-                    config_path = os.path.expanduser('~/.camille/config.json')
-                    if os.path.exists(config_path):
-                        try:
-                            with open(config_path, 'r') as f:
-                                pass
-                            log("Config file is readable")
-                        except PermissionError:
-                            log("PERMISSION ERROR on config file")
-                            send_error("Permission denied accessing Camille config. Run: ./fix-permissions.sh", request.get('id'))
-                            continue
-                    
-                    send_error("Camille server is not running. Please start it with: camille server start", request.get('id'))
-                    continue
+                # Check for permission issues
+                config_path = os.path.expanduser('~/.camille/config.json')
+                if os.path.exists(config_path):
+                    try:
+                        with open(config_path, 'r') as f:
+                            pass
+                        log("Config file is readable")
+                    except PermissionError:
+                        log("PERMISSION ERROR on config file")
+                        send_error("Permission denied accessing Camille config. Run: ./fix-permissions.sh", request.get('id'))
+                        continue
                 
-                try:
-                    # Connect to the Unix domain socket
-                    log(f"CONNECTING TO UNIX SOCKET: {pipe_path}")
-                    client = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-                    client.connect(pipe_path)
-                    log("CONNECTED TO PIPE SUCCESSFULLY")
-                except Exception as e:
-                    log(f"PIPE CONNECTION ERROR: {str(e)}", {"traceback": traceback.format_exc()})
-                    send_error(f"Failed to connect to Camille server: {str(e)}", request.get('id'))
-                    continue
-            
-            # Forward ALL requests to pipe and get response
-            log(f"FORWARDING REQUEST: {request.get('method')}")
-            
-            # Check if this is a notification (no id field)
-            if 'id' not in request:
-                log(f"NOTIFICATION DETECTED (no id): {request.get('method')}")
-                # Send notification without expecting response
-                request_line = json.dumps(request) + '\n'
-                client.sendall(request_line.encode('utf-8'))
-                log(f"NOTIFICATION SENT, NOT WAITING FOR RESPONSE")
+                send_error("Camille server is not running. Please start it with: camille server start", request.get('id'))
                 continue
             
-            response = forward_to_pipe(client, request)
-            send_response(response)
+            # Handle notification
+            if 'id' not in request:
+                log(f"NOTIFICATION DETECTED (no id): {request.get('method')}")
+                if not client:
+                    client = reconnect_with_backoff(pipe_path)
+                if client:
+                    try:
+                        request_line = json.dumps(request) + '\n'
+                        client.sendall(request_line.encode('utf-8'))
+                        log(f"NOTIFICATION SENT, NOT WAITING FOR RESPONSE")
+                    except Exception as e:
+                        log(f"FAILED TO SEND NOTIFICATION: {str(e)}")
+                        client = None
+                continue
+            
+            # Handle regular request with reconnection logic
+            reconnect_attempts = 0
+            response = None
+            
+            while reconnect_attempts < MAX_RECONNECT_ATTEMPTS:
+                if not client:
+                    log(f"CLIENT NOT CONNECTED, ATTEMPTING RECONNECTION (attempt {reconnect_attempts + 1}/{MAX_RECONNECT_ATTEMPTS})")
+                    client = reconnect_with_backoff(pipe_path, reconnect_attempts)
+                    if not client:
+                        reconnect_attempts += 1
+                        continue
+                
+                try:
+                    log(f"FORWARDING REQUEST: {request.get('method')}")
+                    response = forward_to_pipe(client, request)
+                    break  # Success, exit retry loop
+                except Exception as e:
+                    log(f"REQUEST FAILED: {str(e)}")
+                    # Close the broken connection
+                    if client:
+                        try:
+                            client.close()
+                        except:
+                            pass
+                        client = None
+                    reconnect_attempts += 1
+            
+            # Send response or error
+            if response:
+                send_response(response)
+            else:
+                send_error(f"Failed to communicate with Camille server after {MAX_RECONNECT_ATTEMPTS} attempts", request.get('id'))
             
     except KeyboardInterrupt:
         log("KEYBOARD INTERRUPT")

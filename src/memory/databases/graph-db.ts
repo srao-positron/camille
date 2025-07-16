@@ -10,6 +10,8 @@ export interface CodeNode {
   line: number;
   column?: number;
   metadata?: Record<string, any>;
+  name_embedding?: number[];
+  summary_embedding?: number[];
 }
 
 export interface CodeEdge {
@@ -100,4 +102,35 @@ export interface GraphDB {
    * Close database connection
    */
   close(): Promise<void>;
+
+  /**
+   * Get the schema of the graph database
+   */
+  getSchema(): Promise<string>;
+
+  /**
+   * Create vector indices for semantic search
+   */
+  createVectorIndices(): Promise<void>;
+
+  /**
+   * Search using vector similarity
+   * @param queryEmbedding The query vector
+   * @param indexName Name of the vector index to search
+   * @param limit Maximum results
+   */
+  vectorSearch(
+    queryEmbedding: number[], 
+    indexName: string, 
+    limit?: number
+  ): Promise<CodeNode[]>;
+
+  /**
+   * Find nodes by name and file path
+   * @param name The exact name of the node
+   * @param file The file path containing the node
+   * @param type Optional node type filter
+   * @returns Matching nodes
+   */
+  findNodesByNameAndFile(name: string, file: string, type?: string): Promise<CodeNode[]>;
 }

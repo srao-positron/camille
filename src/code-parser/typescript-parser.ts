@@ -280,7 +280,18 @@ export class TypeScriptParser implements CodeParser {
   }
 
   private extractVariable(node: ts.VariableDeclaration, sourceFile: ts.SourceFile, result: ParsedFile): void {
-    const name = node.name.getText();
+    // Extract simple variable names only
+    let name: string;
+    if (ts.isIdentifier(node.name)) {
+      name = node.name.text;
+    } else if (ts.isObjectBindingPattern(node.name) || ts.isArrayBindingPattern(node.name)) {
+      // For destructuring patterns, create a simplified name
+      name = 'destructured';
+    } else {
+      // Skip complex patterns
+      return;
+    }
+    
     const line = this.getLineNumber(node, sourceFile);
     const id = this.generateNodeId(result.file, 'variable', name, line);
 
@@ -306,25 +317,46 @@ export class TypeScriptParser implements CodeParser {
   private extractCallsFromNode(node: ts.Node, sourceFile: ts.SourceFile, result: ParsedFile, sourceNodeId: string): void {
     const visit = (child: ts.Node) => {
       if (ts.isCallExpression(child)) {
-        const functionName = child.expression.getText();
-        const line = this.getLineNumber(child, sourceFile);
-        
-        // Create an edge representing the function call
-        result.edges.push({
-          source: sourceNodeId,
-          target: this.generateNodeId(result.file, 'function', functionName, 0), // We don't know the exact line
-          relationship: 'calls',
-          metadata: {
-            callLine: line,
-            functionName
-          }
-        });
+        // Only create edges for simple function calls, not method calls
+        const functionName = this.extractSimpleFunctionName(child.expression);
+        if (functionName) {
+          const line = this.getLineNumber(child, sourceFile);
+          
+          // Create an edge representing the function call
+          result.edges.push({
+            source: sourceNodeId,
+            target: this.generateNodeId(result.file, 'function', functionName, 0), // We don't know the exact line
+            relationship: 'calls',
+            metadata: {
+              callLine: line,
+              functionName
+            }
+          });
+        }
       }
       
       ts.forEachChild(child, visit);
     };
 
     ts.forEachChild(node, visit);
+  }
+
+  private extractSimpleFunctionName(expression: ts.Expression): string | null {
+    // Handle different types of call expressions to get just the function name
+    if (ts.isIdentifier(expression)) {
+      // Simple function call like: functionName()
+      return expression.text;
+    } else if (ts.isPropertyAccessExpression(expression)) {
+      // Method call like: obj.method()
+      // Skip method calls as they're not standalone functions
+      return null;
+    } else if (ts.isElementAccessExpression(expression)) {
+      // Element access like: obj['method']()
+      // Skip these as well
+      return null;
+    }
+    // For complex expressions, skip creating edges
+    return null;
   }
 
   private getLineNumber(node: ts.Node, sourceFile: ts.SourceFile): number {
@@ -342,6 +374,19 @@ export class TypeScriptParser implements CodeParser {
 
   private generateNodeId(file: string, type: string, name: string, line: number): string {
     const relativePath = path.relative(process.cwd(), file);
-    return `${relativePath}:${type}:${name}:${line}`;
+    // Sanitize the name to avoid issues with special characters in Cypher queries
+    const sanitizedName = this.sanitizeForNodeId(name);
+    return `${relativePath}:${type}:${sanitizedName}:${line}`;
+  }
+
+  private sanitizeForNodeId(name: string): string {
+    // Remove or encode problematic characters
+    return name
+      .replace(/[\r\n]+/g, ' ') // Replace newlines with spaces
+      .replace(/'/g, "\\'") // Escape single quotes
+      .replace(/"/g, '\\"') // Escape double quotes
+      .replace(/[\x00-\x1F\x7F]/g, '') // Remove control characters
+      .trim()
+      .substring(0, 200); // Limit length to prevent excessively long IDs
   }
 }
