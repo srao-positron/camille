@@ -25,6 +25,10 @@ import { logger } from './logger';
 import { TOOLS } from './mcp-server';
 import { CodeNode, CodeEdge } from './memory/databases/graph-db.js';
 import { CamilleAPIServer } from './api-server.js';
+import { EdgeResolver, PendingEdge } from './memory/edge-resolver.js';
+import { EmbeddingManager, EmbeddingRequest } from './memory/embedding-store.js';
+import { LanceEmbeddingStore } from './memory/lance-embedding-store.js';
+import { PipelineManager } from './memory/pipeline-manager.js';
 
 /**
  * Server status
@@ -67,6 +71,10 @@ export class CamilleServer {
   private isProcessingEdges: boolean = false;
   private apiServer?: CamilleAPIServer;
   private unifiedSearch?: CodeUnifiedSearch;
+  private edgeResolver?: EdgeResolver;
+  private embeddingManager?: EmbeddingManager;
+  private pipelineManager?: PipelineManager;
+  private parsedFiles: any[] = [];
 
   constructor() {
     this.configManager = new ConfigManager();
@@ -84,8 +92,17 @@ export class CamilleServer {
     this.watchers = new Map();
     this.watchedDirectories = new Set();
     
-    // Queue for processing files with concurrency limit
-    this.indexQueue = new PQueue({ concurrency: 3 });
+    // Queue for processing files with optimal concurrency
+    // Use CPU count minus 2 for file parsing (CPU-bound)
+    // But limit to reasonable max to avoid overwhelming the system
+    const cpuCount = os.cpus().length;
+    const optimalConcurrency = Math.min(Math.max(4, cpuCount - 2), 16);
+    this.indexQueue = new PQueue({ concurrency: optimalConcurrency });
+    
+    logger.info('File processing queue initialized', { 
+      cpuCount, 
+      concurrency: optimalConcurrency 
+    });
     
     this.status = {
       isRunning: false,
@@ -135,6 +152,17 @@ export class CamilleServer {
         edgeCount: this.status.graphIndexing.edgeCount
       });
       consoleOutput.info(chalk.green('✅ Graph vector indices created'));
+      
+      // Initialize new components
+      const embeddingStore = new LanceEmbeddingStore();
+      await embeddingStore.connect();
+      this.embeddingManager = new EmbeddingManager(embeddingStore, this.openaiClient);
+      this.edgeResolver = new EdgeResolver(this.graphDB);
+      this.pipelineManager = new PipelineManager(
+        this.embeddingManager,
+        this.graphDB,
+        codeParser
+      );
       
       // Initialize unified search
       this.unifiedSearch = new CodeUnifiedSearch(
@@ -446,187 +474,60 @@ export class CamilleServer {
    * Process pending edges in second pass after all nodes are indexed
    */
   private async processPendingEdges(): Promise<void> {
-    if (this.isProcessingEdges || this.pendingEdges.size === 0) {
+    if (this.isProcessingEdges || !this.edgeResolver) {
       return;
     }
     
     this.isProcessingEdges = true;
-    logger.info('Starting second pass: Processing pending edges', {
-      fileCount: this.pendingEdges.size,
-      totalEdges: Array.from(this.pendingEdges.values()).reduce((sum, edges) => sum + edges.length, 0)
-    });
     
     try {
-      let successCount = 0;
-      let failureCount = 0;
+      // Build import maps from parsed files
+      this.edgeResolver.buildImportMaps(this.parsedFiles);
+      
+      // Convert old format to new format
+      const pendingEdges: PendingEdge[] = [];
       
       for (const [filePath, edges] of this.pendingEdges) {
-        logger.info('🔍 Processing edges for file', { 
-          filePath, 
-          edgeCount: edges.length 
-        });
-        
-        // Process each edge and try to resolve the target node
-        const resolvedEdges: CodeEdge[] = [];
-        
         for (const edge of edges) {
-          logger.debug('📊 Processing edge', {
-            source: edge.source,
-            target: edge.target,
-            relationship: edge.relationship,
-            metadata: edge.metadata
-          });
-          
-          // Extract target node information from the ID
-          // Format: "path/to/file:type:name:line"
+          // Extract target info from ID format: "path/to/file:type:name:line"
           const targetParts = edge.target.split(':');
           if (targetParts.length >= 4) {
             const targetFile = targetParts[0];
             const targetType = targetParts[1];
             const targetName = targetParts[2];
-            const targetLine = parseInt(targetParts[3]);
             
-            logger.debug('🔎 Looking for target node', {
-              targetFile,
-              targetType,
+            pendingEdges.push({
+              sourceId: edge.source,
               targetName,
-              targetLine,
-              originalTarget: edge.target
+              targetType,
+              targetFile: targetFile === edge.source.split(':')[0] ? undefined : targetFile,
+              relationship: edge.relationship,
+              metadata: edge.metadata,
+              receiver: edge.metadata?.receiver,
+              importSource: edge.metadata?.importSource
             });
-            
-            // If line is 0 (unknown), try to find the actual node by name and file
-            if (targetLine === 0) {
-              const candidates = await this.graphDB.findNodesByNameAndFile(
-                targetName,
-                targetFile,
-                targetType
-              );
-              
-              logger.info('🎯 Found candidates for edge target', {
-                targetName,
-                targetFile,
-                candidateCount: candidates.length,
-                candidates: candidates.map(c => ({ id: c.id, line: c.line }))
-              });
-              
-              if (candidates.length === 1) {
-                // Single match - use it
-                resolvedEdges.push({
-                  ...edge,
-                  target: candidates[0].id
-                });
-                successCount++;
-                logger.info('✅ Edge resolved successfully', {
-                  source: edge.source,
-                  oldTarget: edge.target,
-                  newTarget: candidates[0].id
-                });
-              } else if (candidates.length > 1) {
-                // Multiple matches - use the first one (could be improved)
-                logger.warn('⚠️ Multiple candidates found, using first match', {
-                  targetName,
-                  candidateCount: candidates.length
-                });
-                resolvedEdges.push({
-                  ...edge,
-                  target: candidates[0].id
-                });
-                successCount++;
-              } else {
-                // No match found - create an external/built-in function node
-                logger.info('🔨 Creating external function node', {
-                  targetName,
-                  targetFile,
-                  targetType
-                });
-                
-                // Determine if this is a built-in function
-                const builtIns = new Set([
-                  'setTimeout', 'setInterval', 'clearTimeout', 'clearInterval',
-                  'fetch', 'console', 'require', 'parseInt', 'parseFloat',
-                  'isNaN', 'isFinite', 'encodeURI', 'decodeURI',
-                  'encodeURIComponent', 'decodeURIComponent', 'eval',
-                  'JSON', 'Math', 'Date', 'Array', 'Object', 'String',
-                  'Number', 'Boolean', 'RegExp', 'Error', 'Promise'
-                ]);
-                
-                const isBuiltIn = builtIns.has(targetName);
-                const nodeType = isBuiltIn ? 'builtin' : 'external';
-                
-                // Create the external/built-in node
-                const externalNode: CodeNode = {
-                  id: edge.target,
-                  type: targetType as any, // Keep original type (function, class, etc)
-                  name: targetName,
-                  file: targetFile,
-                  line: 0, // External functions don't have a line number
-                  metadata: {
-                    external: true,
-                    builtIn: isBuiltIn
-                  }
-                };
-                
-                try {
-                  await this.graphDB.addNode(externalNode);
-                  logger.info('✅ Created external node', { 
-                    id: externalNode.id,
-                    name: targetName,
-                    type: nodeType
-                  });
-                  
-                  // Now add the edge to the newly created node
-                  resolvedEdges.push(edge);
-                  successCount++;
-                } catch (error) {
-                  logger.error('Failed to create external node', { 
-                    error,
-                    node: externalNode 
-                  });
-                  failureCount++;
-                }
-              }
-            } else {
-              // Line number is known, use original edge
-              resolvedEdges.push(edge);
-              successCount++;
-            }
-          } else {
-            logger.error('❌ Invalid edge target format', {
-              target: edge.target,
-              parts: targetParts.length
-            });
-            failureCount++;
           }
-        }
-        
-        // Add all resolved edges to the graph
-        if (resolvedEdges.length > 0) {
-          logger.info('💾 Adding resolved edges to graph', {
-            filePath,
-            resolvedCount: resolvedEdges.length,
-            originalCount: edges.length
-          });
-          
-          await this.graphDB.addEdges(resolvedEdges);
-          
-          logger.info('✅ Edges added successfully', {
-            filePath,
-            addedCount: resolvedEdges.length
-          });
         }
       }
       
+      logger.info('Starting edge resolution with new resolver', {
+        pendingCount: pendingEdges.length,
+        fileCount: this.pendingEdges.size
+      });
+      
+      // Resolve edges using the new resolver
+      const stats = await this.edgeResolver.resolveEdges(pendingEdges);
+      
       // Clear pending edges after processing
       this.pendingEdges.clear();
+      this.parsedFiles = [];
       
       // Update graph statistics
       this.status.graphIndexing.edgeCount = await this.graphDB.getEdgeCount();
       
-      logger.info('✅ Second pass complete', {
-        totalSuccess: successCount,
-        totalFailure: failureCount,
-        successRate: ((successCount / (successCount + failureCount)) * 100).toFixed(2) + '%',
-        finalEdgeCount: this.status.graphIndexing.edgeCount
+      logger.info('✅ Edge resolution complete', {
+        ...stats,
+        totalEdgeCount: this.status.graphIndexing.edgeCount
       });
       
     } catch (error) {
@@ -1534,6 +1435,9 @@ export class CamilleServer {
           importsFound: parsedFile.imports.length,
           exportsFound: parsedFile.exports.length
         });
+        
+        // Store parsed file for edge resolver
+        this.parsedFiles.push(parsedFile);
         
         // Store nodes and edges in graph database
         if (parsedFile.nodes.length > 0) {

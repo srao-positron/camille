@@ -242,6 +242,29 @@ export class TypeScriptParser implements CodeParser {
         });
       });
     }
+
+    // Extract class members and create relationships
+    node.members.forEach(member => {
+      if (ts.isMethodDeclaration(member) || ts.isPropertyDeclaration(member)) {
+        const memberName = member.name?.getText() || '';
+        const memberLine = this.getLineNumber(member, sourceFile);
+        const memberType = ts.isMethodDeclaration(member) ? 'function' : 'property';
+        const memberId = this.generateNodeId(result.file, memberType, memberName, memberLine);
+        
+        // Create relationship: class -> defines -> method/property
+        result.edges.push({
+          source: id,
+          target: memberId,
+          relationship: 'defines',
+          metadata: {
+            memberType,
+            memberName,
+            isStatic: !!(member.modifiers?.some(m => m.kind === ts.SyntaxKind.StaticKeyword)),
+            visibility: this.getVisibility(member.modifiers)
+          }
+        });
+      }
+    });
   }
 
   private extractInterface(node: ts.InterfaceDeclaration, sourceFile: ts.SourceFile, result: ParsedFile): void {
@@ -317,19 +340,39 @@ export class TypeScriptParser implements CodeParser {
   private extractCallsFromNode(node: ts.Node, sourceFile: ts.SourceFile, result: ParsedFile, sourceNodeId: string): void {
     const visit = (child: ts.Node) => {
       if (ts.isCallExpression(child)) {
-        // Only create edges for simple function calls, not method calls
-        const functionName = this.extractSimpleFunctionName(child.expression);
-        if (functionName) {
+        // Extract ALL types of function/method calls
+        const callInfo = this.extractCallInfo(child, sourceFile);
+        if (callInfo) {
           const line = this.getLineNumber(child, sourceFile);
           
-          // Create an edge representing the function call
+          // Create an edge representing the function/method call
           result.edges.push({
             source: sourceNodeId,
-            target: this.generateNodeId(result.file, 'function', functionName, 0), // We don't know the exact line
+            target: this.generateNodeId(result.file, 'function', callInfo.name, 0), // Will be resolved in second pass
             relationship: 'calls',
             metadata: {
               callLine: line,
-              functionName
+              functionName: callInfo.name,
+              callType: callInfo.type,
+              receiver: callInfo.receiver,
+              isChained: callInfo.isChained,
+              isDynamic: callInfo.isDynamic
+            }
+          });
+        }
+      } else if (ts.isNewExpression(child)) {
+        // Handle constructor calls: new ClassName()
+        const className = this.extractClassName(child.expression);
+        if (className) {
+          const line = this.getLineNumber(child, sourceFile);
+          result.edges.push({
+            source: sourceNodeId,
+            target: this.generateNodeId(result.file, 'class', className, 0),
+            relationship: 'uses',
+            metadata: {
+              callLine: line,
+              callType: 'constructor',
+              className
             }
           });
         }
@@ -341,21 +384,109 @@ export class TypeScriptParser implements CodeParser {
     ts.forEachChild(node, visit);
   }
 
-  private extractSimpleFunctionName(expression: ts.Expression): string | null {
-    // Handle different types of call expressions to get just the function name
+  private extractCallInfo(node: ts.CallExpression, sourceFile: ts.SourceFile): { 
+    name: string; 
+    type: string; 
+    receiver?: string;
+    isChained: boolean;
+    isDynamic: boolean;
+  } | null {
+    return this.extractExpressionInfo(node.expression);
+  }
+
+  private extractExpressionInfo(expression: ts.Expression): { 
+    name: string; 
+    type: string; 
+    receiver?: string;
+    isChained: boolean;
+    isDynamic: boolean;
+  } | null {
+    // Simple function call: functionName()
     if (ts.isIdentifier(expression)) {
-      // Simple function call like: functionName()
+      return { 
+        name: expression.text, 
+        type: 'function',
+        isChained: false,
+        isDynamic: false
+      };
+    }
+    
+    // Method call: obj.method() or this.method()
+    if (ts.isPropertyAccessExpression(expression)) {
+      const receiver = expression.expression.getText();
+      const methodName = expression.name.text;
+      
+      // Check if this is a chained call
+      const isChained = ts.isCallExpression(expression.expression);
+      
+      return { 
+        name: methodName, 
+        type: 'method',
+        receiver: receiver,
+        isChained,
+        isDynamic: false
+      };
+    }
+    
+    // Dynamic call: obj[methodName]() or obj['method']()
+    if (ts.isElementAccessExpression(expression)) {
+      const receiver = expression.expression.getText();
+      
+      // Try to extract the method name if it's a string literal
+      if (ts.isStringLiteral(expression.argumentExpression)) {
+        return {
+          name: expression.argumentExpression.text,
+          type: 'method',
+          receiver: receiver,
+          isChained: false,
+          isDynamic: true
+        };
+      }
+      
+      // For dynamic expressions, use the expression text
+      const dynamicKey = expression.argumentExpression.getText();
+      return {
+        name: `[${dynamicKey}]`,
+        type: 'method',
+        receiver: receiver,
+        isChained: false,
+        isDynamic: true
+      };
+    }
+    
+    // Super call: super.method()
+    if (expression.kind === ts.SyntaxKind.SuperKeyword) {
+      return {
+        name: 'super',
+        type: 'super',
+        isChained: false,
+        isDynamic: false
+      };
+    }
+    
+    // Call expression (chained calls): getObj().method()
+    if (ts.isCallExpression(expression)) {
+      // Recursively extract the final call
+      const innerInfo = this.extractExpressionInfo(expression.expression);
+      if (innerInfo) {
+        return {
+          ...innerInfo,
+          isChained: true
+        };
+      }
+    }
+    
+    // Other complex expressions
+    return null;
+  }
+
+  private extractClassName(expression: ts.Expression): string | null {
+    if (ts.isIdentifier(expression)) {
       return expression.text;
     } else if (ts.isPropertyAccessExpression(expression)) {
-      // Method call like: obj.method()
-      // Skip method calls as they're not standalone functions
-      return null;
-    } else if (ts.isElementAccessExpression(expression)) {
-      // Element access like: obj['method']()
-      // Skip these as well
-      return null;
+      // Handle namespaced classes: namespace.ClassName
+      return expression.name.text;
     }
-    // For complex expressions, skip creating edges
     return null;
   }
 

@@ -6,7 +6,7 @@ import { ParserFactory, CodeParser, ParsedFile } from './parser-interface.js';
 import { TypeScriptParser } from './typescript-parser.js';
 import { logger } from '../logger.js';
 
-export class CodeParserManager {
+export class CodeParserManager implements CodeParser {
   private factory: ParserFactory;
 
   constructor() {
@@ -78,6 +78,24 @@ export class CodeParserManager {
    */
   registerParser(parser: CodeParser): void {
     this.factory.registerParser(parser);
+  }
+
+  /**
+   * Parse method to implement CodeParser interface
+   */
+  async parse(filePath: string, content: string): Promise<ParsedFile> {
+    const result = await this.parseFile(filePath, content);
+    if (!result) {
+      // Return empty ParsedFile if no parser available
+      return {
+        file: filePath,
+        nodes: [],
+        edges: [],
+        imports: [],
+        exports: []
+      };
+    }
+    return result;
   }
 }
 

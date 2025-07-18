@@ -1,6 +1,6 @@
 {
   "name": "claude-camille",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "An intelligent code compliance checker and embedding search tool for Claude Code",
   "main": "dist/index.js",
   "bin": {
@@ -52,6 +52,7 @@
     "openai": "^4.67.0",
     "ora": "^8.0.1",
     "p-queue": "^8.0.1",
+    "uuid": "^9.0.1",
     "winston": "^3.11.0"
   },
   "devDependencies": {
@@ -62,6 +63,7 @@
     "@types/jest": "^29.5.12",
     "@types/node": "^20.12.7",
     "@types/node-forge": "^1.3.13",
+    "@types/uuid": "^9.0.7",
     "@typescript-eslint/eslint-plugin": "^7.7.0",
     "@typescript-eslint/parser": "^7.7.0",
     "eslint": "^8.57.0",

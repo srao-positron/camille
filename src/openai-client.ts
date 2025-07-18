@@ -605,6 +605,71 @@ export class OpenAIClient {
   }
 
   /**
+   * Generates embeddings for multiple content items in batch
+   * OpenAI supports up to 100 inputs per request
+   */
+  async generateBatchEmbeddings(contents: string[]): Promise<number[][]> {
+    const startTime = Date.now();
+    const model = this.config.models.embedding || 'text-embedding-3-large';
+    logger.info('Generating batch embeddings', { 
+      model, 
+      batchSize: contents.length,
+      totalInputLength: contents.reduce((sum, c) => sum + c.length, 0)
+    });
+    
+    try {
+      // OpenAI supports up to 100 inputs per request
+      const batchSize = 100;
+      const results: number[][] = [];
+      
+      for (let i = 0; i < contents.length; i += batchSize) {
+        const batch = contents.slice(i, i + batchSize);
+        const response = await this.client.embeddings.create({
+          model,
+          input: batch,
+          encoding_format: 'float'
+        });
+        
+        results.push(...response.data.map(d => d.embedding));
+        
+        logger.debug('Batch embeddings progress', {
+          processed: Math.min(i + batchSize, contents.length),
+          total: contents.length,
+          tokensUsed: response.usage?.total_tokens
+        });
+      }
+
+      const duration = Date.now() - startTime;
+      const totalBatches = Math.ceil(contents.length / batchSize);
+      logger.info('Batch embeddings generated successfully', {
+        model,
+        duration,
+        totalItems: contents.length,
+        totalBatches,
+        efficiency: contents.length / totalBatches
+      });
+      
+      // Log API call (we made multiple calls but count as batch operation)
+      logger.logOpenAICall(model, 0, duration, true);
+
+      return results;
+    } catch (error) {
+      const duration = Date.now() - startTime;
+      logger.error('Batch embedding generation failed', error, { 
+        model,
+        duration,
+        batchSize: contents.length
+      });
+      logger.logOpenAICall(model, 0, duration, false);
+      
+      if (error instanceof Error) {
+        throw new Error(`Batch embedding generation error: ${error.message}`);
+      }
+      throw error;
+    }
+  }
+
+  /**
    * Performs a simple completion without tools
    */
   async complete(prompt: string, model?: string): Promise<string> {
