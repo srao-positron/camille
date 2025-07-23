@@ -94,6 +94,9 @@ export function createSupabaseLoginCommand(): Command {
           options: {
             redirectTo: redirectUrl,
             scopes: 'read:user user:email',
+            queryParams: {
+              response_type: 'code', // Force code flow instead of implicit
+            },
           },
         });
         
