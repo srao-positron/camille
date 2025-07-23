@@ -29,9 +29,10 @@ export SUPABASE_ANON_KEY=your-anon-key
 ## Common Issues
 
 1. **Wrong Supabase URL**: Make sure SUPABASE_URL is set correctly
-2. **Redirect URL not allowed**: Add `https://www.supastate.ai/auth/cli/callback` to Supabase allowed URLs
+2. **Redirect URL not allowed**: The default `/auth/callback` should already be allowed
 3. **Port conflict**: CLI uses port 8899, make sure it's available
 4. **CORS issues**: The route handler includes CORS headers, check browser console
+5. **Supabase ignoring redirect_to**: This is expected - we handle CLI auth via query params
 
 ## Testing Locally
 

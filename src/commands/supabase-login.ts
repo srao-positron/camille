@@ -27,7 +27,8 @@ export function createSupabaseLoginCommand(): Command {
         const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpxbGZ4YWtia3dzc3hmeW5ybW5rIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTM1NzMxMDMsImV4cCI6MjA2OTE0OTEwM30.kPrFPanFFAdhUWpfaaMiHrg5WHR3ywKhXfMjr-5DWKE';
         
         console.log(chalk.gray(`[DEBUG] Using Supabase URL: ${supabaseUrl}`));
-        console.log(chalk.gray(`[DEBUG] Redirect URL will be: ${options.url}/auth/cli/callback?port=${port}`));
+        console.log(chalk.gray(`[DEBUG] Default callback will be: ${options.url}/auth/callback`));
+        console.log(chalk.gray(`[DEBUG] CLI params: cli=true&port=${port}`));
         
         const supabase = createClient(supabaseUrl, supabaseAnonKey);
         
@@ -84,12 +85,14 @@ export function createSupabaseLoginCommand(): Command {
         
         server.listen(port);
         
-        // Generate auth URL with redirect to www.supastate.ai
+        // Generate auth URL with CLI indicator in redirect
         console.log(chalk.gray(`[DEBUG] Generating OAuth URL...`));
+        // Use the default callback but add CLI params
+        const redirectUrl = `${options.url}/auth/callback?cli=true&port=${port}`;
         const { data: authData, error: authError } = await supabase.auth.signInWithOAuth({
           provider: 'github',
           options: {
-            redirectTo: `${options.url}/auth/cli/callback?port=${port}`,
+            redirectTo: redirectUrl,
             scopes: 'read:user user:email',
           },
         });
