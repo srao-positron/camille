@@ -38,37 +38,37 @@ export function createSupabaseLoginCommand(): Command {
         const server = createServer(async (req, res) => {
           const url = new URL(req.url!, `http://localhost:${port}`);
           
-          if (url.pathname === '/callback') {
-            const code = url.searchParams.get('code');
-            
-            if (code) {
-              res.writeHead(200, { 'Content-Type': 'text/html' });
-              res.end(`
-                <html>
-                  <body style="font-family: system-ui; padding: 40px; text-align: center;">
-                    <h2>✅ Authentication successful!</h2>
-                    <p>You can close this window and return to your terminal.</p>
-                    <script>window.close();</script>
-                  </body>
-                </html>
-              `);
-              
-              // Exchange code for session
-              const { data, error } = await supabase.auth.exchangeCodeForSession(code);
-              
-              if (error) {
-                resolveAuth({ error });
-              } else {
-                resolveAuth({ session: data.session });
+          if (url.pathname === '/cli-callback' && req.method === 'POST') {
+            // Handle API key callback from service.supastate.ai
+            let body = '';
+            req.on('data', chunk => {
+              body += chunk.toString();
+            });
+            req.on('end', () => {
+              try {
+                const data = JSON.parse(body);
+                res.writeHead(200, { 
+                  'Content-Type': 'application/json',
+                  'Access-Control-Allow-Origin': '*'
+                });
+                res.end(JSON.stringify({ success: true }));
+                resolveAuth({ apiKeyData: data });
+                server.close();
+              } catch (err) {
+                res.writeHead(400);
+                res.end('Invalid data');
+                resolveAuth({ error: 'Invalid callback data' });
+                server.close();
               }
-              
-              server.close();
-            } else {
-              res.writeHead(400);
-              res.end('Missing authorization code');
-              resolveAuth({ error: 'Missing authorization code' });
-              server.close();
-            }
+            });
+          } else if (url.pathname === '/cli-callback' && req.method === 'OPTIONS') {
+            // Handle CORS preflight
+            res.writeHead(200, {
+              'Access-Control-Allow-Origin': '*',
+              'Access-Control-Allow-Methods': 'POST, OPTIONS',
+              'Access-Control-Allow-Headers': 'Content-Type',
+            });
+            res.end();
           } else {
             res.writeHead(404);
             res.end('Not found');
@@ -77,11 +77,11 @@ export function createSupabaseLoginCommand(): Command {
         
         server.listen(port);
         
-        // Generate auth URL
+        // Generate auth URL with redirect to service.supastate.ai
         const { data: authData, error: authError } = await supabase.auth.signInWithOAuth({
           provider: 'github',
           options: {
-            redirectTo: redirectUri,
+            redirectTo: `${options.url}/auth/cli/callback?port=${port}`,
             scopes: 'read:user user:email',
           },
         });
@@ -103,49 +103,31 @@ export function createSupabaseLoginCommand(): Command {
           throw new Error(`Authentication failed: ${result.error}`);
         }
         
-        console.log(chalk.green('✅ Authenticated with Supabase'));
-        
-        // Exchange the session token for an API key
-        console.log(chalk.gray('Obtaining API key...'));
-        
-        const response = await fetch(`${options.url}/api/auth/exchange-token`, {
-          method: 'POST',
-          headers: {
-            'Authorization': `Bearer ${result.session.access_token}`,
-            'Content-Type': 'application/json',
-          },
-        });
-        
-        if (!response.ok) {
-          const error = await response.json();
-          throw new Error(`Failed to obtain API key: ${error.error || response.statusText}`);
-        }
-        
-        const apiKeyData = await response.json();
-        
-        // Save configuration
-        const configManager = new ConfigManager();
-        const config = configManager.getConfig();
-        
-        if (apiKeyData.action === 'created') {
-          // New API key created
+        // Check if we got API key data directly from the callback
+        if (result.apiKeyData) {
+          console.log(chalk.green('✅ Authenticated with Supabase'));
+          console.log(chalk.gray('Received API key from Supastate...'));
+          
+          // Save configuration
+          const configManager = new ConfigManager();
+          const config = configManager.getConfig();
+          
           configManager.updateConfig({
             supastate: {
               ...config.supastate,
               enabled: true,
               url: options.url,
-              apiKey: apiKeyData.apiKey,
-              userId: apiKeyData.userId,
-              email: apiKeyData.email,
+              apiKey: result.apiKeyData.apiKey,
+              userId: result.apiKeyData.userId,
+              email: result.apiKeyData.email,
             },
           });
           
           console.log(chalk.green('✅ API key created and saved'));
-          console.log(chalk.gray(`Logged in as: ${apiKeyData.email}`));
+          console.log(chalk.gray(`Logged in as: ${result.apiKeyData.email}`));
         } else {
-          // Existing API key
-          console.log(chalk.yellow('⚠️  You already have an API key for Camille'));
-          console.log(chalk.gray('To generate a new key, please revoke the existing one in Supastate dashboard'));
+          // This shouldn't happen with the new flow
+          throw new Error('No API key received from authentication flow');
         }
         
         console.log(chalk.cyan('\n🚀 Supastate integration is ready!'));

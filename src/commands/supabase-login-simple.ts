@@ -102,7 +102,7 @@ export function createSupabaseLoginSimpleCommand(): Command {
         console.log(chalk.gray('Your memories and code will now sync to Supastate for enhanced search'));
         
       } catch (error) {
-        console.error(chalk.red('Login failed:'), error.message);
+        console.error(chalk.red('Login failed:'), error instanceof Error ? error.message : String(error));
         process.exit(1);
       }
     });
