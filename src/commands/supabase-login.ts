@@ -13,16 +13,16 @@ export function createSupabaseLoginCommand(): Command {
   
   command
     .description('Login to Supastate and obtain API key')
-    .option('--url <url>', 'Supastate URL', 'https://supastate.ai')
+    .option('--url <url>', 'Supastate URL', 'https://service.supastate.ai')
     .action(async (options) => {
       try {
         console.log(chalk.cyan('🔐 Logging in to Supastate...'));
         
         // Create a local server to handle the callback
-        const port = 54321;
+        const port = 8899; // Use a different port to avoid conflicts
         const redirectUri = `http://localhost:${port}/callback`;
         
-        // Initialize Supabase client
+        // Initialize Supabase client - use production URL
         const supabaseUrl = 'https://zqlfxakbkwssxfynrmnk.supabase.co';
         const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpxbGZ4YWtia3dzc3hmeW5ybW5rIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTM1NzMxMDMsImV4cCI6MjA2OTE0OTEwM30.kPrFPanFFAdhUWpfaaMiHrg5WHR3ywKhXfMjr-5DWKE';
         
