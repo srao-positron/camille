@@ -30,6 +30,7 @@ import { EmbeddingManager, EmbeddingRequest } from './memory/embedding-store.js'
 import { LanceEmbeddingStore } from './memory/lance-embedding-store.js';
 import { PipelineManager } from './memory/pipeline-manager.js';
 import { SupastateSyncService } from './services/supastate-sync.js';
+import { SupastateStorageProvider } from './storage/supastate-provider.js';
 
 /**
  * Server status
@@ -77,6 +78,7 @@ export class CamilleServer {
   private pipelineManager?: PipelineManager;
   private parsedFiles: any[] = [];
   private supastateSyncService?: SupastateSyncService;
+  private supastateProvider?: SupastateStorageProvider;
 
   constructor() {
     this.configManager = new ConfigManager();
@@ -204,6 +206,18 @@ export class CamilleServer {
         }
       } else {
         logger.info('Supastate sync not enabled in config');
+      }
+      
+      // Initialize SupastateStorageProvider for server-side processing
+      if (config.supastate?.enabled) {
+        try {
+          this.supastateProvider = new SupastateStorageProvider();
+          logger.info('SupastateStorageProvider initialized for server-side processing');
+          consoleOutput.info(chalk.green('✅ Using Supastate for server-side embedding generation'));
+        } catch (error) {
+          logger.error('Failed to initialize SupastateStorageProvider:', error);
+          consoleOutput.warning(chalk.yellow('⚠️  Falling back to local embedding generation'));
+        }
       }
     } catch (error) {
       logger.error('Failed to connect to graph database', { error });
@@ -434,6 +448,16 @@ export class CamilleServer {
         consoleOutput.info(chalk.gray('Supastate sync stopped'));
       } catch (error) {
         logger.error('Failed to stop Supastate sync', { error });
+      }
+    }
+    
+    // Close SupastateStorageProvider if active
+    if (this.supastateProvider) {
+      try {
+        await this.supastateProvider.close();
+        consoleOutput.info(chalk.gray('Supastate provider closed'));
+      } catch (error) {
+        logger.error('Failed to close Supastate provider', { error });
       }
     }
     
@@ -1448,6 +1472,33 @@ export class CamilleServer {
         return;
       }
       
+      // If Supastate is enabled, send raw file for server-side processing
+      if (this.supastateProvider) {
+        logger.info('Using Supastate for server-side processing', { path: filePath });
+        
+        // Determine language from file extension
+        const ext = path.extname(filePath).substring(1);
+        const language = ext || 'plaintext';
+        
+        // Send to Supastate for processing
+        await this.supastateProvider.addCodeFile(process.cwd(), {
+          path: filePath,
+          content: content,
+          language: language,
+          lastModified: fs.statSync(filePath).mtime.toISOString(),
+        });
+        
+        logger.info('File sent to Supastate for processing', { path: filePath });
+        
+        // Still parse code structure locally for immediate graph availability
+        await this.parseAndIndexCodeStructure(filePath, content);
+        
+        return;
+      }
+      
+      // Original local processing (only if Supastate is not enabled)
+      logger.debug('Using local embedding generation', { path: filePath });
+      
       // Generate summary for the file
       logger.debug('Generating summary for file', { path: filePath, size: content.length });
       const summary = await this.generateFileSummary(filePath, content);
@@ -1490,6 +1541,36 @@ export class CamilleServer {
         
         // Store parsed file for edge resolver
         this.parsedFiles.push(parsedFile);
+        
+        // If using Supastate, skip local embedding generation
+        if (this.supastateProvider) {
+          logger.info('Skipping local embedding generation - using Supastate', { path: filePath });
+          
+          // Store nodes without embeddings for now
+          // They will be available after Supastate processes them
+          if (parsedFile.nodes.length > 0) {
+            const nodesWithoutEmbeddings = parsedFile.nodes.map(node => ({
+              ...node,
+              name_embedding: new Array(1536).fill(0), // Placeholder
+              summary_embedding: new Array(1536).fill(0), // Placeholder
+            }));
+            
+            await this.graphDB.addNodes(nodesWithoutEmbeddings);
+            logger.debug('Added nodes to graph database (embeddings pending)', { 
+              nodeCount: nodesWithoutEmbeddings.length 
+            });
+          }
+          
+          // Add edges
+          if (parsedFile.edges.length > 0) {
+            await this.graphDB.addEdges(parsedFile.edges);
+            logger.debug('Added edges to graph database', { 
+              edgeCount: parsedFile.edges.length 
+            });
+          }
+          
+          return;
+        }
         
         // Store nodes and edges in graph database
         if (parsedFile.nodes.length > 0) {
