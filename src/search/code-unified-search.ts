@@ -8,6 +8,7 @@ import { GraphQueryResult, CodeNode } from '../memory/databases/graph-db.js';
 import { ConfigManager } from '../config.js';
 import { OpenAIClient } from '../openai-client.js';
 import { logger } from '../logger.js';
+import { SupastateStorageProvider } from '../storage/supastate-provider.js';
 
 export interface CodeSearchOptions {
   limit?: number;
@@ -49,14 +50,26 @@ export interface EnhancedSearchResult extends SearchResult {
 export class CodeUnifiedSearch {
   private embeddingsIndex: EmbeddingsIndex;
   private graphDB: KuzuGraphDB;
-  private openaiClient: OpenAIClient;
+  private openaiClient?: OpenAIClient;
   private configManager: ConfigManager;
+  private supastateProvider?: SupastateStorageProvider;
 
-  constructor(embeddingsIndex: EmbeddingsIndex, graphDB: KuzuGraphDB, openaiClient: OpenAIClient) {
+  constructor(embeddingsIndex: EmbeddingsIndex, graphDB: KuzuGraphDB, openaiClient?: OpenAIClient) {
     this.embeddingsIndex = embeddingsIndex;
     this.graphDB = graphDB;
     this.openaiClient = openaiClient;
     this.configManager = new ConfigManager();
+    
+    // Check if Supastate is enabled
+    const config = this.configManager.getConfig();
+    if (config.supastate?.enabled) {
+      try {
+        this.supastateProvider = new SupastateStorageProvider();
+        logger.info('CodeUnifiedSearch using Supastate for search');
+      } catch (error) {
+        logger.error('Failed to initialize SupastateStorageProvider:', error);
+      }
+    }
   }
 
   /**
@@ -110,6 +123,26 @@ export class CodeUnifiedSearch {
    * Perform vector search using embeddings
    */
   private async performVectorSearch(query: string, limit: number): Promise<EnhancedSearchResult[]> {
+    // If using Supastate, use their search API
+    if (this.supastateProvider) {
+      const results = await this.supastateProvider.searchCode(query, limit);
+      return results.map((result: any) => ({
+        path: result.metadata?.path || '',
+        similarity: result.score,
+        content: result.content,
+        summary: result.metadata?.summary || '',
+        lineMatches: [],
+        dependencies: undefined,
+        graphMatches: undefined
+      }));
+    }
+    
+    // Original local search
+    if (!this.openaiClient) {
+      logger.warn('No OpenAI client available for vector search');
+      return [];
+    }
+    
     const queryEmbedding = await this.openaiClient.generateEmbedding(query);
     const vectorResults = this.embeddingsIndex.search(queryEmbedding, limit, query);
     
@@ -162,6 +195,13 @@ Return ONLY the Cypher query, no explanation.`;
       logger.info('🤖 Calling OpenAI for Text2Cypher', { model: 'gpt-4o-mini', promptLength: prompt.length });
       
       // Use GPT-4o-mini for Text2Cypher conversion
+      if (!this.openaiClient) {
+        logger.warn('No OpenAI client available for Text2Cypher');
+        // Fallback to basic pattern matching
+        const directoryFilter = directory ? ` AND n.file =~ '.*${directory}.*'` : '';
+        return `MATCH (n:CodeObject) WHERE n.name =~ '.*${query.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}.*'${directoryFilter} RETURN n LIMIT 10`;
+      }
+      
       const response = await this.openaiClient.complete(prompt, 'gpt-4o-mini');
       
       // Strip markdown code blocks if present

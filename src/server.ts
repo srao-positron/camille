@@ -55,7 +55,7 @@ export interface ServerStatus {
 export class CamilleServer {
   private configManager: ConfigManager;
   private llmClient: LLMClient;
-  private openaiClient: OpenAIClient;
+  private openaiClient!: OpenAIClient;
   private embeddingsIndex: EmbeddingsIndex;
   private graphDB: KuzuGraphDB;
   private fileFilter: FileFilter;
@@ -84,11 +84,20 @@ export class CamilleServer {
     this.configManager = new ConfigManager();
     const config = this.configManager.getConfig();
     
+    // Initialize LLM client (always needed for code reviews)
     this.llmClient = new LLMClient(config, process.cwd());
-    // Always use OpenAI API key for embeddings, regardless of provider
-    const openaiApiKey = this.configManager.getOpenAIApiKey();
-    this.openaiClient = new OpenAIClient(openaiApiKey, config, process.cwd());
-    this.embeddingsIndex = new EmbeddingsIndex(this.configManager);
+    
+    // Only initialize OpenAI client and embeddings if Supastate is not enabled
+    if (!config.supastate?.enabled) {
+      const openaiApiKey = this.configManager.getOpenAIApiKey();
+      this.openaiClient = new OpenAIClient(openaiApiKey, config, process.cwd());
+      this.embeddingsIndex = new EmbeddingsIndex(this.configManager);
+    } else {
+      logger.info('Supastate enabled - skipping OpenAI client and local embeddings initialization');
+      // Create minimal embeddings index for compatibility
+      this.embeddingsIndex = new EmbeddingsIndex(this.configManager);
+    }
+    
     this.graphDB = new KuzuGraphDB();
     this.fileFilter = new FileFilter(config.ignorePatterns);
     
@@ -160,26 +169,32 @@ export class CamilleServer {
       });
       consoleOutput.info(chalk.green('✅ Graph vector indices created'));
       
-      // Initialize new components
-      const embeddingStore = new LanceEmbeddingStore();
-      await embeddingStore.connect();
-      this.embeddingManager = new EmbeddingManager(embeddingStore, this.openaiClient);
-      this.edgeResolver = new EdgeResolver(this.graphDB);
-      this.pipelineManager = new PipelineManager(
-        this.embeddingManager,
-        this.graphDB,
-        codeParser
-      );
+      // Initialize new components only if not using Supastate
+      const config = this.configManager.getConfig();
+      if (!config.supastate?.enabled) {
+        const embeddingStore = new LanceEmbeddingStore();
+        await embeddingStore.connect();
+        this.embeddingManager = new EmbeddingManager(embeddingStore, this.openaiClient!);
+        this.pipelineManager = new PipelineManager(
+          this.embeddingManager,
+          this.graphDB,
+          codeParser
+        );
+      }
       
-      // Initialize unified search
-      this.unifiedSearch = new CodeUnifiedSearch(
-        this.embeddingsIndex,
-        this.graphDB,
-        this.openaiClient
-      );
+      // Always initialize edge resolver for graph database
+      this.edgeResolver = new EdgeResolver(this.graphDB);
+      
+      // Initialize unified search only if not using Supastate
+      if (!config.supastate?.enabled) {
+        this.unifiedSearch = new CodeUnifiedSearch(
+          this.embeddingsIndex,
+          this.graphDB,
+          this.openaiClient
+        );
+      }
       
       // Initialize Supastate sync service if enabled
-      const config = this.configManager.getConfig();
       logger.info('Checking Supastate configuration', { 
         enabled: config.supastate?.enabled,
         hasUrl: !!config.supastate?.url,
@@ -869,7 +884,67 @@ export class CamilleServer {
     } = args;
     
     try {
-      // Use shared unified search instance if available, otherwise create one
+      // If Supastate is enabled, use Supastate search
+      if (this.supastateProvider) {
+        logger.info('Using Supastate for search', { query, limit });
+        
+        const searchResults = await this.supastateProvider.searchMemories(query, limit);
+        
+        // Convert Supastate results to expected format
+        const results = searchResults.map(result => ({
+          path: result.metadata?.filePath || 'unknown',
+          similarity: result.score,
+          content: result.content,
+          summary: result.metadata?.summary,
+          lineMatches: [],
+          dependencies: undefined,
+          graphMatches: undefined
+        }));
+        
+        const jsonResult: any = {
+          results: results.map((result: any) => {
+            const relativePath = result.path === 'unknown' ? result.path : path.relative(process.cwd(), result.path);
+            return {
+              path: relativePath,
+              similarity: result.similarity.toFixed(3),
+              summary: result.summary || 'No summary available',
+              preview: result.content.substring(0, 200) + '...',
+              lineMatches: result.lineMatches
+            };
+          }),
+          totalFiles: results.length,
+          indexStatus: {
+            ready: true,
+            filesIndexed: results.length,
+            isIndexing: false,
+            graphReady: false,
+            graphIndexing: false
+          },
+          queryAnalysis: {
+            includeDependencies: false
+          },
+          warning: 'Using Supastate search - graph features disabled'
+        };
+        
+        // Format response based on requested format
+        if (responseFormat === 'json') {
+          return jsonResult;
+        } else if (responseFormat === 'text') {
+          return this.formatSearchResultsAsText(query, jsonResult);
+        } else {
+          return {
+            content: [
+              {
+                type: 'text',
+                text: this.formatSearchResultsAsText(query, jsonResult)
+              }
+            ],
+            data: jsonResult
+          };
+        }
+      }
+      
+      // Original local search
       const unifiedSearch = this.unifiedSearch || new CodeUnifiedSearch(
         this.embeddingsIndex,
         this.graphDB,
@@ -1506,7 +1581,7 @@ export class CamilleServer {
       // Generate embedding
       const embeddingInput = `${path.basename(filePath)}\n${summary}\n${content.substring(0, 8000)}`;
       logger.debug('Generating embedding for file', { path: filePath, inputSize: embeddingInput.length });
-      const embedding = await this.openaiClient.generateEmbedding(embeddingInput);
+      const embedding = await this.openaiClient!.generateEmbedding(embeddingInput);
       
       // Store in index
       this.embeddingsIndex.addEmbedding(filePath, embedding, content, summary);
@@ -1585,13 +1660,13 @@ export class CamilleServer {
             parsedFile.nodes.map(async (node) => {
               try {
                 // Generate embedding for node name
-                const nameEmbedding = await this.openaiClient.generateEmbedding(
+                const nameEmbedding = await this.openaiClient!.generateEmbedding(
                   `${node.type} ${node.name}`
                 );
                 
                 // Generate embedding for node context (includes type, name, and file)
                 const contextString = `${node.type} ${node.name} in ${path.basename(node.file)}`;
-                const summaryEmbedding = await this.openaiClient.generateEmbedding(contextString);
+                const summaryEmbedding = await this.openaiClient!.generateEmbedding(contextString);
                 
                 return {
                   ...node,

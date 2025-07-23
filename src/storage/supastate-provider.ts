@@ -231,6 +231,33 @@ export class SupastateStorageProvider {
   }
 
   /**
+   * Search code files
+   */
+  async searchCode(query: string, limit: number = 20): Promise<SearchResult[]> {
+    try {
+      const response = await fetch(`${this.baseUrl}/api/search/code?` + new URLSearchParams({
+        q: query,
+        limit: limit.toString(),
+        includeProcessing: 'true'
+      }), {
+        headers: {
+          'Authorization': `Bearer ${this.apiKey}`,
+        },
+      });
+
+      if (!response.ok) {
+        throw new Error(`Search failed: ${response.statusText}`);
+      }
+
+      const data = await response.json();
+      return data.results || [];
+    } catch (error) {
+      logger.error('Failed to search code', error);
+      return [];
+    }
+  }
+
+  /**
    * Similarity search (not implemented - use search API)
    */
   async similaritySearch(

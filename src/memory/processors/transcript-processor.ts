@@ -8,6 +8,7 @@ import { ConfigManager } from '../../config.js';
 import { OpenAIClient } from '../../openai-client.js';
 import { VectorDB } from '../databases/vector-db.js';
 import { LanceVectorDB } from '../databases/lance-db.js';
+import { SupastateStorageProvider } from '../../storage/supastate-provider.js';
 
 export interface Message {
   timestamp: string;
@@ -44,9 +45,10 @@ export interface ProcessingOptions {
 }
 
 export class TranscriptProcessor {
-  private vectorDB: VectorDB;
-  private openAI: OpenAIClient;
+  private vectorDB?: VectorDB;
+  private openAI?: OpenAIClient;
   private config: ConfigManager;
+  private supastateProvider?: SupastateStorageProvider;
   private defaultOptions: ProcessingOptions = {
     chunkSize: 2000,          // ~500 tokens (more conservative to avoid hitting limits)
     chunkOverlap: 100,        // ~25 tokens overlap
@@ -56,12 +58,27 @@ export class TranscriptProcessor {
 
   constructor() {
     this.config = new ConfigManager();
-    const apiKey = this.config.getOpenAIApiKey();
-    if (!apiKey) {
-      throw new Error('OpenAI API key not configured');
+    const config = this.config.getConfig();
+    
+    // Check if Supastate is enabled
+    if (config.supastate?.enabled) {
+      try {
+        this.supastateProvider = new SupastateStorageProvider();
+        logger.info('TranscriptProcessor using Supastate for server-side processing');
+      } catch (error) {
+        logger.error('Failed to initialize SupastateStorageProvider:', error);
+      }
     }
-    this.openAI = new OpenAIClient(apiKey, this.config.getConfig(), process.cwd());
-    this.vectorDB = new LanceVectorDB('transcripts');
+    
+    // Only initialize OpenAI if Supastate is not enabled
+    if (!this.supastateProvider) {
+      const apiKey = this.config.getOpenAIApiKey();
+      if (!apiKey) {
+        throw new Error('OpenAI API key not configured');
+      }
+      this.openAI = new OpenAIClient(apiKey, config, process.cwd());
+      this.vectorDB = new LanceVectorDB('transcripts');
+    }
   }
 
   /**
@@ -83,10 +100,41 @@ export class TranscriptProcessor {
       // Create semantic chunks
       const chunks = this.createChunks(messages, sessionId, projectPath, opts);
       
-      // Generate embeddings
-      const embeddedChunks = await this.generateEmbeddings(chunks, opts);
+      // If Supastate is enabled, send raw chunks for server-side processing
+      if (this.supastateProvider) {
+        logger.info('Sending conversation chunks to Supastate', { 
+          chunkCount: chunks.length,
+          sessionId 
+        });
+        
+        // Send each chunk to Supastate
+        for (const chunk of chunks) {
+          await this.supastateProvider.addMemory(sessionId, {
+            chunkId: chunk.id,
+            content: chunk.text,
+            metadata: {
+              ...chunk.metadata,
+              startTime: chunk.startTime,
+              endTime: chunk.endTime,
+              messageCount: chunk.messageCount,
+              // messageType is for Supastate's internal use
+              hasCode: false,
+              projectPath: projectPath || process.cwd(),
+            }
+          });
+        }
+        
+        // Flush to ensure immediate processing
+        await this.supastateProvider.flushAll();
+        
+        return {
+          chunks: chunks.length,
+          embeddings: chunks.length // All chunks will be embedded server-side
+        };
+      }
       
-      // Store in vector database
+      // Original local processing
+      const embeddedChunks = await this.generateEmbeddings(chunks, opts);
       await this.store(embeddedChunks);
       
       return {
@@ -130,10 +178,41 @@ export class TranscriptProcessor {
       // Create semantic chunks
       const chunks = this.createChunks(messages, sessionId, projectPath, opts);
       
-      // Generate embeddings
-      const embeddedChunks = await this.generateEmbeddings(chunks, opts);
+      // If Supastate is enabled, send raw chunks for server-side processing
+      if (this.supastateProvider) {
+        logger.info('Sending conversation chunks to Supastate', { 
+          chunkCount: chunks.length,
+          sessionId 
+        });
+        
+        // Send each chunk to Supastate
+        for (const chunk of chunks) {
+          await this.supastateProvider.addMemory(sessionId, {
+            chunkId: chunk.id,
+            content: chunk.text,
+            metadata: {
+              ...chunk.metadata,
+              startTime: chunk.startTime,
+              endTime: chunk.endTime,
+              messageCount: chunk.messageCount,
+              // messageType is for Supastate's internal use
+              hasCode: false,
+              projectPath: projectPath || process.cwd(),
+            }
+          });
+        }
+        
+        // Flush to ensure immediate processing
+        await this.supastateProvider.flushAll();
+        
+        return {
+          chunks: chunks.length,
+          embeddings: chunks.length // All chunks will be embedded server-side
+        };
+      }
       
-      // Store in vector database
+      // Original local processing
+      const embeddedChunks = await this.generateEmbeddings(chunks, opts);
       await this.store(embeddedChunks);
       
       return {
@@ -362,9 +441,13 @@ export class TranscriptProcessor {
       
       try {
         // Generate embeddings for batch
+        if (!this.openAI) {
+          throw new Error('OpenAI client not initialized');
+        }
+        
         const embeddings = await Promise.all(
           batch.map(chunk => 
-            this.openAI.generateEmbedding(chunk.text)
+            this.openAI!.generateEmbedding(chunk.text)
           )
         );
         
@@ -390,11 +473,15 @@ export class TranscriptProcessor {
    * Store embedded chunks in vector database
    */
   async store(embeddedChunks: EmbeddedChunk[]): Promise<void> {
+    if (!this.vectorDB) {
+      throw new Error('VectorDB not initialized');
+    }
+    
     await this.vectorDB.connect();
     
     try {
       for (const chunk of embeddedChunks) {
-        await this.vectorDB.index(chunk.embedding, {
+        await this.vectorDB!.index(chunk.embedding, {
           content: chunk.text,
           chunkId: chunk.id,
           sessionId: chunk.metadata.sessionId,
@@ -409,7 +496,7 @@ export class TranscriptProcessor {
       
       logger.info(`Stored ${embeddedChunks.length} embedded chunks`);
     } finally {
-      await this.vectorDB.close();
+      await this.vectorDB!.close();
     }
   }
 

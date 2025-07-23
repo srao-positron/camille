@@ -9,6 +9,7 @@ import { VectorDB, SearchResult as VectorSearchResult } from '../databases/vecto
 import { GraphDB, GraphQueryResult, CodeNode } from '../databases/graph-db.js';
 import { LanceVectorDB } from '../databases/lance-db.js';
 import { KuzuGraphDB } from '../databases/kuzu-db.js';
+import { SupastateStorageProvider } from '../../storage/supastate-provider.js';
 
 export interface SearchOptions {
   limit?: number;
@@ -58,19 +59,36 @@ export interface CodeElementResult {
 }
 
 export class UnifiedSearch {
-  private vectorDB: VectorDB;
+  private vectorDB?: VectorDB;
   private graphDB: GraphDB;
-  private openAI: OpenAIClient;
+  private openAI?: OpenAIClient;
   private config: ConfigManager;
+  private supastateProvider?: SupastateStorageProvider;
 
   constructor() {
     this.config = new ConfigManager();
-    const apiKey = this.config.getOpenAIApiKey();
-    if (!apiKey) {
-      throw new Error('OpenAI API key not configured');
+    const config = this.config.getConfig();
+    
+    // Check if Supastate is enabled
+    if (config.supastate?.enabled) {
+      try {
+        this.supastateProvider = new SupastateStorageProvider();
+        logger.info('UnifiedSearch using Supastate for search');
+      } catch (error) {
+        logger.error('Failed to initialize SupastateStorageProvider:', error);
+      }
     }
-    this.openAI = new OpenAIClient(apiKey, this.config.getConfig(), process.cwd());
-    this.vectorDB = new LanceVectorDB('transcripts');
+    
+    // Only initialize OpenAI if Supastate is not enabled
+    if (!this.supastateProvider) {
+      const apiKey = this.config.getOpenAIApiKey();
+      if (!apiKey) {
+        throw new Error('OpenAI API key not configured');
+      }
+      this.openAI = new OpenAIClient(apiKey, config, process.cwd());
+      this.vectorDB = new LanceVectorDB('transcripts');
+    }
+    
     this.graphDB = new KuzuGraphDB();
   }
 
@@ -158,10 +176,33 @@ export class UnifiedSearch {
       scoreThreshold: number;
     }
   ): Promise<ConversationResult[]> {
-    await this.vectorDB.connect();
+    // Only connect if we have a vectorDB and not using Supastate
+    if (this.vectorDB && !this.supastateProvider) {
+      await this.vectorDB.connect();
+    }
 
     try {
-      // Generate embedding for query
+      // If using Supastate, use their search API directly
+      if (this.supastateProvider) {
+        const results = await this.supastateProvider.searchMemories(query, options.limit || 10);
+        return results.map(result => ({
+          content: result.content,
+          sessionId: result.metadata?.sessionId || 'unknown',
+          projectPath: result.metadata?.projectPath,
+          timestamp: result.metadata?.timestamp || new Date().toISOString(),
+          score: result.score,
+          topics: result.metadata?.topics,
+          context: result.metadata?.context,
+          chunkId: result.chunkId
+        }));
+      }
+      
+      // Generate embedding for query (only if not using Supastate)
+      if (!this.openAI || !this.vectorDB) {
+        logger.warn('No OpenAI client or VectorDB available for search');
+        return [];
+      }
+      
       const queryEmbedding = await this.openAI.generateEmbedding(query);
 
       // Build filter based on options
@@ -199,7 +240,9 @@ export class UnifiedSearch {
 
       return conversations;
     } finally {
-      await this.vectorDB.close();
+      if (this.vectorDB && !this.supastateProvider) {
+        await this.vectorDB.close();
+      }
     }
   }
 
