@@ -150,27 +150,36 @@ export class CamilleServer {
     // Register this instance with ServerManager
     ServerManager.setInstance(this);
     
-    // Initialize graph database
-    try {
-      await this.graphDB.connect();
-      consoleOutput.info(chalk.green('✅ Graph database connected'));
-      
-      // Create vector indices for semantic search in graph
-      await this.graphDB.createVectorIndices();
-      
-      // Update initial graph statistics
-      this.status.graphIndexing.isReady = true;
-      this.status.graphIndexing.nodeCount = await this.graphDB.getNodeCount();
-      this.status.graphIndexing.edgeCount = await this.graphDB.getEdgeCount();
-      
-      logger.info('📊 Initial graph statistics', {
-        nodeCount: this.status.graphIndexing.nodeCount,
-        edgeCount: this.status.graphIndexing.edgeCount
-      });
-      consoleOutput.info(chalk.green('✅ Graph vector indices created'));
-      
-      // Initialize new components only if not using Supastate
-      const config = this.configManager.getConfig();
+    // Initialize graph database only if Supastate is not enabled
+    const config = this.configManager.getConfig();
+    if (!config.supastate?.enabled) {
+      try {
+        await this.graphDB.connect();
+        consoleOutput.info(chalk.green('✅ Graph database connected'));
+        
+        // Create vector indices for semantic search in graph
+        await this.graphDB.createVectorIndices();
+        
+        // Update initial graph statistics
+        this.status.graphIndexing.isReady = true;
+        this.status.graphIndexing.nodeCount = await this.graphDB.getNodeCount();
+        this.status.graphIndexing.edgeCount = await this.graphDB.getEdgeCount();
+        
+        logger.info('📊 Initial graph statistics', {
+          nodeCount: this.status.graphIndexing.nodeCount,
+          edgeCount: this.status.graphIndexing.edgeCount
+        });
+        consoleOutput.info(chalk.green('✅ Graph vector indices created'));
+      } catch (error) {
+        logger.error('Failed to connect to graph database', { error });
+        consoleOutput.warning(chalk.yellow('⚠️  Graph database unavailable - search will use vector only'));
+      }
+    } else {
+      logger.info('Graph database disabled when Supastate is enabled');
+      consoleOutput.info(chalk.yellow('ℹ️  Graph database disabled - using Supastate for all operations'));
+    }
+    
+    // Initialize new components only if not using Supastate
       if (!config.supastate?.enabled) {
         const embeddingStore = new LanceEmbeddingStore();
         await embeddingStore.connect();
@@ -182,8 +191,10 @@ export class CamilleServer {
         );
       }
       
-      // Always initialize edge resolver for graph database
-      this.edgeResolver = new EdgeResolver(this.graphDB);
+      // Initialize edge resolver only if graph database is enabled
+      if (!config.supastate?.enabled) {
+        this.edgeResolver = new EdgeResolver(this.graphDB);
+      }
       
       // Initialize unified search only if not using Supastate
       if (!config.supastate?.enabled) {
@@ -234,10 +245,6 @@ export class CamilleServer {
           consoleOutput.warning(chalk.yellow('⚠️  Falling back to local embedding generation'));
         }
       }
-    } catch (error) {
-      logger.error('Failed to connect to graph database', { error });
-      consoleOutput.warning(chalk.yellow('⚠️  Graph database unavailable - search will use vector only'));
-    }
     
     // Start the named pipe server IMMEDIATELY for MCP communication
     await this.startPipeServer();
@@ -558,6 +565,13 @@ export class CamilleServer {
    * Process pending edges in second pass after all nodes are indexed
    */
   private async processPendingEdges(): Promise<void> {
+    // Skip edge processing if Supastate is enabled
+    const config = this.configManager.getConfig();
+    if (config.supastate?.enabled) {
+      logger.debug('Skipping edge processing - Supastate is enabled');
+      return;
+    }
+    
     if (this.isProcessingEdges || !this.edgeResolver) {
       return;
     }
@@ -1047,6 +1061,15 @@ export class CamilleServer {
     const { query, explain = false } = args;
     
     try {
+      // Check if Supastate is enabled
+      const config = this.configManager.getConfig();
+      if (config.supastate?.enabled) {
+        return {
+          error: 'Graph queries are disabled when Supastate is enabled',
+          hint: 'Graph query API endpoints will be available in a future update'
+        };
+      }
+      
       // Ensure graph database is initialized
       if (!this.graphDB) {
         return {
@@ -1617,33 +1640,12 @@ export class CamilleServer {
         // Store parsed file for edge resolver
         this.parsedFiles.push(parsedFile);
         
-        // If using Supastate, skip local embedding generation
+        // If using Supastate, skip ALL graph operations
         if (this.supastateProvider) {
-          logger.info('Skipping local embedding generation - using Supastate', { path: filePath });
-          
-          // Store nodes without embeddings for now
-          // They will be available after Supastate processes them
-          if (parsedFile.nodes.length > 0) {
-            const nodesWithoutEmbeddings = parsedFile.nodes.map(node => ({
-              ...node,
-              name_embedding: new Array(1536).fill(0), // Placeholder
-              summary_embedding: new Array(1536).fill(0), // Placeholder
-            }));
-            
-            await this.graphDB.addNodes(nodesWithoutEmbeddings);
-            logger.debug('Added nodes to graph database (embeddings pending)', { 
-              nodeCount: nodesWithoutEmbeddings.length 
-            });
-          }
-          
-          // Add edges
-          if (parsedFile.edges.length > 0) {
-            await this.graphDB.addEdges(parsedFile.edges);
-            logger.debug('Added edges to graph database', { 
-              edgeCount: parsedFile.edges.length 
-            });
-          }
-          
+          logger.info('Skipping graph database operations - using Supastate', { 
+            path: filePath,
+            reason: 'Code graphs disabled when Supastate is enabled'
+          });
           return;
         }
         
