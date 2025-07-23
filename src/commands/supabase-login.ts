@@ -22,9 +22,12 @@ export function createSupabaseLoginCommand(): Command {
         const port = 8899; // Use a different port to avoid conflicts
         const redirectUri = `http://localhost:${port}/callback`;
         
-        // Initialize Supabase client - use production URL
-        const supabaseUrl = 'https://zqlfxakbkwssxfynrmnk.supabase.co';
-        const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpxbGZ4YWtia3dzc3hmeW5ybW5rIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTM1NzMxMDMsImV4cCI6MjA2OTE0OTEwM30.kPrFPanFFAdhUWpfaaMiHrg5WHR3ywKhXfMjr-5DWKE';
+        // Initialize Supabase client - use service.supastate.ai
+        const supabaseUrl = process.env.SUPABASE_URL || 'https://service.supastate.ai';
+        const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpxbGZ4YWtia3dzc3hmeW5ybW5rIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTM1NzMxMDMsImV4cCI6MjA2OTE0OTEwM30.kPrFPanFFAdhUWpfaaMiHrg5WHR3ywKhXfMjr-5DWKE';
+        
+        console.log(chalk.gray(`[DEBUG] Using Supabase URL: ${supabaseUrl}`));
+        console.log(chalk.gray(`[DEBUG] Redirect URL will be: ${options.url}/auth/cli/callback?port=${port}`));
         
         const supabase = createClient(supabaseUrl, supabaseAnonKey);
         
@@ -40,21 +43,25 @@ export function createSupabaseLoginCommand(): Command {
           
           if (url.pathname === '/cli-callback' && req.method === 'POST') {
             // Handle API key callback from www.supastate.ai
+            console.log(chalk.gray('[DEBUG] Received POST to /cli-callback'));
             let body = '';
             req.on('data', chunk => {
               body += chunk.toString();
             });
             req.on('end', () => {
               try {
+                console.log(chalk.gray('[DEBUG] Received body:', body));
                 const data = JSON.parse(body);
                 res.writeHead(200, { 
                   'Content-Type': 'application/json',
                   'Access-Control-Allow-Origin': '*'
                 });
                 res.end(JSON.stringify({ success: true }));
+                console.log(chalk.gray('[DEBUG] Successfully received API key data'));
                 resolveAuth({ apiKeyData: data });
                 server.close();
               } catch (err) {
+                console.error(chalk.red('[DEBUG] Error parsing callback data:', err));
                 res.writeHead(400);
                 res.end('Invalid data');
                 resolveAuth({ error: 'Invalid callback data' });
@@ -77,7 +84,8 @@ export function createSupabaseLoginCommand(): Command {
         
         server.listen(port);
         
-        // Generate auth URL with redirect to service.supastate.ai
+        // Generate auth URL with redirect to www.supastate.ai
+        console.log(chalk.gray(`[DEBUG] Generating OAuth URL...`));
         const { data: authData, error: authError } = await supabase.auth.signInWithOAuth({
           provider: 'github',
           options: {
@@ -87,9 +95,11 @@ export function createSupabaseLoginCommand(): Command {
         });
         
         if (authError || !authData.url) {
+          console.error(chalk.red(`[DEBUG] OAuth error:`, authError));
           throw new Error('Failed to generate authentication URL');
         }
         
+        console.log(chalk.gray(`[DEBUG] Generated auth URL: ${authData.url}`));
         console.log(chalk.gray(`Opening browser for authentication...`));
         await open(authData.url);
         
