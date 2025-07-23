@@ -49,17 +49,12 @@ export class HybridStorage implements StorageProvider {
   async searchMemories(query: string, limit?: number): Promise<SearchResult[]> {
     if (this.useSupastate && this.provider) {
       return await this.provider.searchMemories(query, limit);
-    } else if (this.localEmbeddings) {
-      // Use local search
-      const results = await this.localEmbeddings.search(query, limit || 20);
-      return results.map(r => ({
-        content: r.content,
-        score: r.score,
-        metadata: r.metadata || {},
-        chunkId: r.metadata?.chunkId || '',
-      }));
+    } else {
+      // Local search not implemented for text queries
+      // Would need to generate embeddings first
+      logger.warn('Local memory search not implemented for text queries');
+      return [];
     }
-    return [];
   }
 
   async addCodeFile(projectPath: string, file: CodeFile): Promise<void> {

@@ -30,7 +30,7 @@ export function createSupabaseLoginCommand(): Command {
         
         // Create promise to wait for callback
         let resolveAuth: (value: any) => void;
-        const authPromise = new Promise((resolve) => {
+        const authPromise = new Promise<any>((resolve) => {
           resolveAuth = resolve;
         });
         

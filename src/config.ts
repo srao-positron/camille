@@ -57,6 +57,7 @@ export interface CamilleConfig {
     apiKey?: string;
     teamId?: string;
     userId?: string;
+    email?: string;
     autoSync?: boolean;
     syncInterval?: number; // in minutes
     serverSideProcessing?: boolean; // Use new architecture

@@ -229,4 +229,26 @@ export class SupastateStorageProvider {
       this.flushInterval = null;
     }
   }
+
+  /**
+   * Similarity search (not implemented - use search API)
+   */
+  async similaritySearch(
+    query: string,
+    options?: { limit?: number; threshold?: number }
+  ): Promise<any[]> {
+    // Similarity search happens server-side via API
+    return [];
+  }
+
+  /**
+   * Query graph (not implemented - will use graph API)
+   */
+  async queryGraph(
+    query: string,
+    options?: { includeRelationships?: boolean; depth?: number }
+  ): Promise<any> {
+    // Graph queries will be implemented server-side
+    return { entities: [], relationships: [] };
+  }
 }
