@@ -9,7 +9,7 @@ export function createSupabaseLoginSimpleCommand(): Command {
   
   command
     .description('Login to Supastate with email and password')
-    .option('--url <url>', 'Supastate URL', 'https://service.supastate.ai')
+    .option('--url <url>', 'Supastate URL', 'https://www.supastate.ai')
     .option('-e, --email <email>', 'Email address')
     .action(async (options) => {
       try {

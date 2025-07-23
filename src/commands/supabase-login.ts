@@ -13,7 +13,7 @@ export function createSupabaseLoginCommand(): Command {
   
   command
     .description('Login to Supastate and obtain API key')
-    .option('--url <url>', 'Supastate URL', 'https://service.supastate.ai')
+    .option('--url <url>', 'Supastate URL', 'https://www.supastate.ai')
     .action(async (options) => {
       try {
         console.log(chalk.cyan('🔐 Logging in to Supastate...'));
@@ -39,7 +39,7 @@ export function createSupabaseLoginCommand(): Command {
           const url = new URL(req.url!, `http://localhost:${port}`);
           
           if (url.pathname === '/cli-callback' && req.method === 'POST') {
-            // Handle API key callback from service.supastate.ai
+            // Handle API key callback from www.supastate.ai
             let body = '';
             req.on('data', chunk => {
               body += chunk.toString();
