@@ -8,6 +8,7 @@ import * as http from 'http';
 import { logger } from './logger.js';
 import { ServerManager } from './server.js';
 import { KuzuGraphDB } from './memory/databases/kuzu-db.js';
+import { SupastateSyncService } from './services/supastate-sync.js';
 
 export class CamilleAPIServer {
   private app: express.Application;
@@ -124,6 +125,88 @@ export class CamilleAPIServer {
           error: 'Query failed', 
           message: error instanceof Error ? error.message : 'Unknown error'
         });
+      }
+    });
+
+    // Supastate sync endpoint
+    this.app.post('/api/supastate/sync', async (req: Request, res: Response) => {
+      try {
+        const server = ServerManager.getInstance();
+        if (!server) {
+          res.status(503).json({ error: 'Server not running' });
+          return;
+        }
+
+        // Get the sync service from the server
+        const syncService = server.getSupastateSyncService();
+        if (!syncService || !syncService.isSupastateEnabled()) {
+          res.status(503).json({ error: 'Supastate sync not enabled. Run "camille supastate login" first.' });
+          return;
+        }
+
+        // Extract options from request body
+        const { memoriesOnly = false, graphsOnly = false } = req.body;
+
+        // Start sync in background
+        res.json({ 
+          message: 'Sync started in background',
+          mode: memoriesOnly ? 'memories' : graphsOnly ? 'graphs' : 'all'
+        });
+
+        // Run sync asynchronously
+        (async () => {
+          try {
+            logger.info('Manual Supastate sync triggered via API', { memoriesOnly, graphsOnly });
+            
+            if (memoriesOnly) {
+              await syncService.syncMemories();
+            } else if (graphsOnly) {
+              await syncService.syncGraphs();
+            } else {
+              await syncService.syncAll();
+            }
+            
+            logger.info('Manual Supastate sync completed');
+          } catch (error) {
+            logger.error('Manual Supastate sync failed', { error });
+          }
+        })();
+      } catch (error) {
+        logger.error('Supastate sync endpoint error', { error });
+        res.status(500).json({ error: 'Failed to trigger sync' });
+      }
+    });
+
+    // Supastate sync status
+    this.app.get('/api/supastate/status', async (req: Request, res: Response) => {
+      try {
+        const server = ServerManager.getInstance();
+        logger.info('Supastate status check', { 
+          hasServer: !!server,
+          serverType: server?.constructor?.name 
+        });
+        
+        if (!server) {
+          res.status(503).json({ error: 'Server not running' });
+          return;
+        }
+
+        const syncService = server.getSupastateSyncService();
+        logger.debug('Supastate sync service check', { 
+          hasSyncService: !!syncService,
+          isEnabled: syncService?.isSupastateEnabled()
+        });
+        
+        if (!syncService) {
+          res.status(503).json({ error: 'Supastate sync service not available' });
+          return;
+        }
+
+        const status = await syncService.getStatus();
+        res.json(status);
+      } catch (error) {
+        logger.error('Supastate status endpoint error', { error });
+        res.status(500).json({ error: 'Failed to get sync status' });
       }
     });
 

@@ -29,6 +29,7 @@ import { EdgeResolver, PendingEdge } from './memory/edge-resolver.js';
 import { EmbeddingManager, EmbeddingRequest } from './memory/embedding-store.js';
 import { LanceEmbeddingStore } from './memory/lance-embedding-store.js';
 import { PipelineManager } from './memory/pipeline-manager.js';
+import { SupastateSyncService } from './services/supastate-sync.js';
 
 /**
  * Server status
@@ -75,6 +76,7 @@ export class CamilleServer {
   private embeddingManager?: EmbeddingManager;
   private pipelineManager?: PipelineManager;
   private parsedFiles: any[] = [];
+  private supastateSyncService?: SupastateSyncService;
 
   constructor() {
     this.configManager = new ConfigManager();
@@ -134,6 +136,9 @@ export class CamilleServer {
     
     this.status.isRunning = true;
     
+    // Register this instance with ServerManager
+    ServerManager.setInstance(this);
+    
     // Initialize graph database
     try {
       await this.graphDB.connect();
@@ -170,6 +175,36 @@ export class CamilleServer {
         this.graphDB,
         this.openaiClient
       );
+      
+      // Initialize Supastate sync service if enabled
+      const config = this.configManager.getConfig();
+      logger.info('Checking Supastate configuration', { 
+        enabled: config.supastate?.enabled,
+        hasUrl: !!config.supastate?.url,
+        hasApiKey: !!config.supastate?.apiKey,
+        teamId: config.supastate?.teamId
+      });
+      
+      if (config.supastate?.enabled) {
+        try {
+          this.supastateSyncService = new SupastateSyncService();
+          const isEnabled = this.supastateSyncService.isSupastateEnabled();
+          logger.info('SupastateSyncService created', { isEnabled });
+          
+          if (!isEnabled) {
+            throw new Error('SupastateSyncService failed to enable');
+          }
+          
+          await this.supastateSyncService.initialize(this.embeddingsIndex, this.graphDB);
+          consoleOutput.info(chalk.green('✅ Supastate sync service initialized'));
+        } catch (error) {
+          logger.error('Failed to initialize Supastate sync', { error });
+          consoleOutput.warning(chalk.yellow('⚠️  Supastate sync unavailable'));
+          this.supastateSyncService = undefined;
+        }
+      } else {
+        logger.info('Supastate sync not enabled in config');
+      }
     } catch (error) {
       logger.error('Failed to connect to graph database', { error });
       consoleOutput.warning(chalk.yellow('⚠️  Graph database unavailable - search will use vector only'));
@@ -392,6 +427,16 @@ export class CamilleServer {
       }
     }
     
+    // Stop Supastate sync service if running
+    if (this.supastateSyncService) {
+      try {
+        this.supastateSyncService.stopAutoSync();
+        consoleOutput.info(chalk.gray('Supastate sync stopped'));
+      } catch (error) {
+        logger.error('Failed to stop Supastate sync', { error });
+      }
+    }
+    
     // Close all watchers
     for (const [_, watcher] of this.watchers) {
       await watcher.close();
@@ -579,6 +624,13 @@ export class CamilleServer {
    */
   public getUnifiedSearch(): CodeUnifiedSearch | undefined {
     return this.unifiedSearch;
+  }
+
+  /**
+   * Gets the Supastate sync service instance
+   */
+  public getSupastateSyncService(): SupastateSyncService | undefined {
+    return this.supastateSyncService;
   }
 
   /**
@@ -1886,6 +1938,13 @@ export class ServerManager {
    */
   public static getInstance(): CamilleServer | undefined {
     return this.instance;
+  }
+  
+  /**
+   * Sets the server instance (used when server starts itself)
+   */
+  public static setInstance(server: CamilleServer): void {
+    this.instance = server;
   }
 
   /**

@@ -51,6 +51,16 @@ export interface CamilleConfig {
     method?: string;
   };
   memory?: MemoryConfig; // Memory system configuration
+  supastate?: {
+    enabled: boolean;
+    url?: string;
+    apiKey?: string;
+    teamId?: string;
+    userId?: string;
+    autoSync?: boolean;
+    syncInterval?: number; // in minutes
+    serverSideProcessing?: boolean; // Use new architecture
+  };
 }
 
 /**
@@ -252,6 +262,13 @@ export class ConfigManager {
    */
   public getConfigDir(): string {
     return this.configDir;
+  }
+
+  /**
+   * Gets the config file path
+   */
+  public getConfigPath(): string {
+    return this.configPath;
   }
 
   /**
