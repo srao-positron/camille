@@ -10,14 +10,14 @@ import path from 'path';
 import os from 'os';
 import { ConfigManager } from '../config.js';
 import { SupastateClient } from '../services/supastate-client.js';
-import { createSupastateLoginCommand } from './supastate-login.js';
+import { createSupabaseLoginCommand } from './supabase-login.js';
 
 export function createSupastateCommand(): Command {
   const supastate = new Command('supastate')
     .description('Manage Supastate cloud integration');
 
   // Add the login subcommand
-  supastate.addCommand(createSupastateLoginCommand());
+  supastate.addCommand(createSupabaseLoginCommand());
 
   /**
    * Enable Supastate integration
