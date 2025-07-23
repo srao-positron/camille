@@ -120,6 +120,9 @@ export class SupastateStorageProvider {
       try {
         logger.debug(`Flushing ${chunks.length} memory chunks for session ${sid}`);
         
+        // Get project path from first chunk's metadata, fallback to cwd
+        const projectPath = chunks[0]?.metadata?.projectPath || process.cwd();
+        
         const response = await fetch(`${this.baseUrl}/api/ingest/memory`, {
           method: 'POST',
           headers: {
@@ -128,7 +131,7 @@ export class SupastateStorageProvider {
           },
           body: JSON.stringify({
             sessionId: sid,
-            projectPath: process.cwd(),
+            projectPath: projectPath,
             chunks: chunks.map(c => ({
               chunkId: c.chunkId,
               content: c.content,
