@@ -12,8 +12,7 @@ export function createSupabaseLoginCommand(): Command {
   
   command
     .description('Login to Supastate and obtain API key')
-    .option('--url <url>', 'Supastate URL', 'https://www.supastate.ai')
-    .action(async (options) => {
+    .action(async () => {
       try {
         console.log(chalk.cyan('🔐 Logging in to Supastate...'));
         
@@ -77,7 +76,9 @@ export function createSupabaseLoginCommand(): Command {
         // Use server-side OAuth flow to avoid PKCE issues
         console.log(chalk.gray(`[DEBUG] Initializing server-side OAuth flow...`));
         
-        const initResponse = await fetch(`${options.url}/api/auth/cli-init?port=${port}`, {
+        // Always use the web app URL for OAuth, not the API URL
+        const webAppUrl = 'https://www.supastate.ai';
+        const initResponse = await fetch(`${webAppUrl}/api/auth/cli-init?port=${port}`, {
           method: 'GET',
           headers: {
             'Content-Type': 'application/json',
@@ -121,7 +122,7 @@ export function createSupabaseLoginCommand(): Command {
             supastate: {
               ...config.supastate,
               enabled: true,
-              url: options.url,
+              url: 'https://service.supastate.ai', // Always use the API URL for edge functions
               accessToken: result.apiKeyData.accessToken,
               refreshToken: result.apiKeyData.refreshToken,
               expiresAt: result.apiKeyData.expiresAt,
