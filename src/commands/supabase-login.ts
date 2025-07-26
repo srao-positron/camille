@@ -113,6 +113,8 @@ export function createSupabaseLoginCommand(): Command {
               expiresAt: result.apiKeyData.expiresAt,
               userId: result.apiKeyData.userId,
               email: result.apiKeyData.email,
+              supabaseUrl: result.apiKeyData.supabaseUrl,
+              supabaseAnonKey: result.apiKeyData.supabaseAnonKey,
             },
           });
           

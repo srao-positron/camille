@@ -58,6 +58,8 @@ export interface CamilleConfig {
     accessToken?: string; // JWT access token
     refreshToken?: string; // JWT refresh token
     expiresAt?: number; // Unix timestamp when access token expires
+    supabaseUrl?: string; // Supabase project URL for token refresh
+    supabaseAnonKey?: string; // Supabase anon key for token refresh
     teamId?: string;
     userId?: string;
     email?: string;

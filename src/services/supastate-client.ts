@@ -1,4 +1,7 @@
 /**
+ * @deprecated This client uses the old API key authentication method.
+ * New code should use SupastateStorageProvider which uses JWT tokens and edge functions.
+ * 
  * Supastate API client for communicating with Supastate cloud service
  */
 
@@ -40,6 +43,9 @@ export interface SyncStatus {
   errorMessage?: string;
 }
 
+/**
+ * @deprecated Use SupastateStorageProvider instead
+ */
 export class SupastateClient {
   private config: ConfigManager;
   private baseUrl: string;
@@ -51,14 +57,19 @@ export class SupastateClient {
     this.config = new ConfigManager();
     const supastate = this.config.getConfig().supastate;
     
-    if (!supastate?.url || !supastate?.apiKey) {
+    // Support both old API key and new JWT auth for backward compatibility
+    if (!supastate?.url || (!supastate?.apiKey && !supastate?.accessToken)) {
       throw new Error('Supastate not configured. Run "camille supastate login" first.');
     }
     
     this.baseUrl = supastate.url;
-    this.apiKey = supastate.apiKey;
+    this.apiKey = supastate.apiKey || ''; // May be empty for JWT auth
     this.teamId = supastate.teamId;
     this.userId = supastate.userId;
+    
+    if (!this.apiKey && supastate.accessToken) {
+      logger.warn('SupastateClient is using deprecated API key auth. Please use SupastateStorageProvider for JWT auth.');
+    }
   }
 
   /**

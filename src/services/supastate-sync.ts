@@ -1,4 +1,7 @@
 /**
+ * @deprecated This service uses the old API key authentication method.
+ * New code should use SupastateStorageProvider which handles sync automatically.
+ * 
  * Supastate sync service for automatic synchronization of memories and graphs
  */
 

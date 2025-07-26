@@ -49,17 +49,22 @@ export class SupastateStorageProvider {
       logger.debug('Access token expired or expiring soon, refreshing...');
       
       try {
-        const response = await fetch(`${this.baseUrl}/api/auth/refresh`, {
+        // Use Supabase auth refresh endpoint
+        const supabaseUrl = supastate.supabaseUrl || this.baseUrl.replace('service.supastate.ai', 'https://pkwzimgcvjqhsbkmdlec.supabase.co');
+        const response = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=refresh_token`, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
+            'apikey': supastate.supabaseAnonKey || '', // Need anon key for refresh
           },
           body: JSON.stringify({
-            refreshToken: supastate.refreshToken,
+            refresh_token: supastate.refreshToken,
           }),
         });
         
         if (!response.ok) {
+          const errorData = await response.text();
+          logger.error('Refresh token response:', errorData);
           throw new Error('Failed to refresh token');
         }
         
@@ -69,14 +74,16 @@ export class SupastateStorageProvider {
         this.config.updateConfig({
           supastate: {
             ...supastate,
-            accessToken: data.accessToken,
-            refreshToken: data.refreshToken,
-            expiresAt: data.expiresAt,
+            accessToken: data.access_token,
+            refreshToken: data.refresh_token,
+            expiresAt: Math.floor(Date.now() / 1000) + (data.expires_in || 3600),
+            supabaseUrl: supastate.supabaseUrl, // Preserve Supabase URL
+            supabaseAnonKey: supastate.supabaseAnonKey, // Preserve anon key
           },
         });
         
         logger.info('Successfully refreshed access token');
-        return data.accessToken;
+        return data.access_token;
       } catch (error) {
         logger.error('Failed to refresh token:', error);
         throw new Error('Authentication expired. Please run "camille supastate login" again.');
@@ -251,7 +258,6 @@ export class SupastateStorageProvider {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            workspaceId: 'user:' + (this.config.getConfig().supastate?.userId || 'default'),
             projectName: path.basename(projectPath),
             teamId: undefined, // TODO: Add team support
             chunks: chunks.map(c => ({
@@ -299,10 +305,6 @@ export class SupastateStorageProvider {
         // Get project name from path
         const projectName = path.basename(project);
         
-        // Determine workspace ID (for now, use user workspace)
-        // In a real implementation, this would come from auth context
-        const workspaceId = 'user:' + (this.config.getConfig().supastate?.userId || 'default');
-        
         // Prepare files with git metadata
         const filesWithMetadata = files.map(f => ({
           path: path.relative(project, f.path), // Make path relative to project
@@ -321,7 +323,6 @@ export class SupastateStorageProvider {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            workspaceId: workspaceId,
             projectName: projectName,
             files: filesWithMetadata,
             fullSync: false
