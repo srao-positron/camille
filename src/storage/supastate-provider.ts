@@ -244,7 +244,7 @@ export class SupastateStorageProvider {
         
         // Determine workspace ID (for now, use user workspace)
         // In a real implementation, this would come from auth context
-        const workspaceId = 'user:' + (this.config.getConfig().userId || 'default');
+        const workspaceId = 'user:' + (this.config.getConfig().supastate?.userId || 'default');
         
         // Prepare files with git metadata
         const filesWithMetadata = files.map(f => ({
