@@ -2,7 +2,6 @@ import { Command } from 'commander';
 import chalk from 'chalk';
 import inquirer from 'inquirer';
 import open from 'open';
-import { createClient } from '@supabase/supabase-js';
 import { ConfigManager } from '../config.js';
 import fetch from 'node-fetch';
 import { createServer } from 'http';
@@ -21,16 +20,6 @@ export function createSupabaseLoginCommand(): Command {
         // Create a local server to handle the callback
         const port = 8899; // Use a different port to avoid conflicts
         const redirectUri = `http://localhost:${port}/callback`;
-        
-        // Initialize Supabase client
-        const supabaseUrl = 'https://zqlfxakbkwssxfynrmnk.supabase.co';
-        const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpxbGZ4YWtia3dzc3hmeW5ybW5rIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTMxMjQzMTIsImV4cCI6MjA2ODcwMDMxMn0.qHj1WTuVlhS9Tq63ZNFtSGxDBU8w06Lci6pgTzV5-go';
-        
-        console.log(chalk.gray(`[DEBUG] Using Supabase URL: ${supabaseUrl}`));
-        console.log(chalk.gray(`[DEBUG] Default callback will be: ${options.url}/auth/callback`));
-        console.log(chalk.gray(`[DEBUG] CLI params: cli=true&port=${port}`));
-        
-        const supabase = createClient(supabaseUrl, supabaseAnonKey);
         
         // Create promise to wait for callback
         let resolveAuth: (value: any) => void;
@@ -85,42 +74,32 @@ export function createSupabaseLoginCommand(): Command {
         
         server.listen(port);
         
-        // Generate auth URL with CLI indicator in redirect
-        console.log(chalk.gray(`[DEBUG] Generating OAuth URL...`));
+        // Use server-side OAuth flow to avoid PKCE issues
+        console.log(chalk.gray(`[DEBUG] Initializing server-side OAuth flow...`));
         
-        // We need to encode the CLI params properly in the redirect URL
-        const cliParams = new URLSearchParams({
-          cli: 'true',
-          port: port.toString()
-        });
-        const redirectUrl = `${options.url}/auth/callback?${cliParams.toString()}`;
-        
-        console.log(chalk.gray(`[DEBUG] Redirect URL will be: ${redirectUrl}`));
-        
-        const { data: authData, error: authError } = await supabase.auth.signInWithOAuth({
-          provider: 'github',
-          options: {
-            redirectTo: redirectUrl,
-            scopes: 'read:user user:email',
-            skipBrowserRedirect: false, // Let Supabase handle the redirect
-            queryParams: {
-              access_type: 'offline', // Request refresh token
-              prompt: 'consent', // Force consent to get refresh token
-            },
+        const initResponse = await fetch(`${options.url}/api/auth/cli-init?port=${port}`, {
+          method: 'GET',
+          headers: {
+            'Content-Type': 'application/json',
           },
         });
         
-        if (authError || !authData.url) {
-          console.error(chalk.red(`[DEBUG] OAuth error:`, authError));
-          throw new Error('Failed to generate authentication URL');
+        if (!initResponse.ok) {
+          throw new Error('Failed to initialize authentication');
         }
         
-        console.log(chalk.gray(`[DEBUG] Generated auth URL: ${authData.url}`));
+        const { authUrl } = await initResponse.json() as any;
+        
+        if (!authUrl) {
+          throw new Error('No authentication URL received');
+        }
+        
+        console.log(chalk.gray(`[DEBUG] Generated auth URL: ${authUrl}`));
         console.log(chalk.gray(`Opening browser for authentication...`));
-        await open(authData.url);
+        await open(authUrl);
         
         console.log(chalk.gray(`Waiting for authentication...`));
-        console.log(chalk.gray(`If the browser doesn't open, visit: ${authData.url}`));
+        console.log(chalk.gray(`If the browser doesn't open, visit: ${authUrl}`));
         
         // Wait for authentication
         const result = await authPromise;
