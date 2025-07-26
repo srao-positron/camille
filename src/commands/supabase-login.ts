@@ -22,9 +22,9 @@ export function createSupabaseLoginCommand(): Command {
         const port = 8899; // Use a different port to avoid conflicts
         const redirectUri = `http://localhost:${port}/callback`;
         
-        // Initialize Supabase client - use service.supastate.ai
-        const supabaseUrl = process.env.SUPABASE_URL || 'https://service.supastate.ai';
-        const supabaseAnonKey = process.env.SUPABASE_ANON_KEY || 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpxbGZ4YWtia3dzc3hmeW5ybW5rIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTM1NzMxMDMsImV4cCI6MjA2OTE0OTEwM30.kPrFPanFFAdhUWpfaaMiHrg5WHR3ywKhXfMjr-5DWKE';
+        // Initialize Supabase client
+        const supabaseUrl = 'https://zqlfxakbkwssxfynrmnk.supabase.co';
+        const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InpxbGZ4YWtia3dzc3hmeW5ybW5rIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTMxMjQzMTIsImV4cCI6MjA2ODcwMDMxMn0.qHj1WTuVlhS9Tq63ZNFtSGxDBU8w06Lci6pgTzV5-go';
         
         console.log(chalk.gray(`[DEBUG] Using Supabase URL: ${supabaseUrl}`));
         console.log(chalk.gray(`[DEBUG] Default callback will be: ${options.url}/auth/callback`));
@@ -94,8 +94,10 @@ export function createSupabaseLoginCommand(): Command {
           options: {
             redirectTo: redirectUrl,
             scopes: 'read:user user:email',
+            skipBrowserRedirect: false, // Let Supabase handle the redirect
             queryParams: {
-              response_type: 'code', // Force code flow instead of implicit
+              access_type: 'offline', // Request refresh token
+              prompt: 'consent', // Force consent to get refresh token
             },
           },
         });
