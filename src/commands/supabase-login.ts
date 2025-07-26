@@ -87,8 +87,16 @@ export function createSupabaseLoginCommand(): Command {
         
         // Generate auth URL with CLI indicator in redirect
         console.log(chalk.gray(`[DEBUG] Generating OAuth URL...`));
-        // Use the default callback but add CLI params
-        const redirectUrl = `${options.url}/auth/callback?cli=true&port=${port}`;
+        
+        // We need to encode the CLI params properly in the redirect URL
+        const cliParams = new URLSearchParams({
+          cli: 'true',
+          port: port.toString()
+        });
+        const redirectUrl = `${options.url}/auth/callback?${cliParams.toString()}`;
+        
+        console.log(chalk.gray(`[DEBUG] Redirect URL will be: ${redirectUrl}`));
+        
         const { data: authData, error: authError } = await supabase.auth.signInWithOAuth({
           provider: 'github',
           options: {
