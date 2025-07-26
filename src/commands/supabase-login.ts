@@ -73,34 +73,19 @@ export function createSupabaseLoginCommand(): Command {
         
         server.listen(port);
         
-        // Use server-side OAuth flow to avoid PKCE issues
-        console.log(chalk.gray(`[DEBUG] Initializing server-side OAuth flow...`));
+        // Use server-side OAuth flow
+        console.log(chalk.gray(`[DEBUG] Opening browser for authentication...`));
         
-        // Always use the web app URL for OAuth, not the API URL
+        // Open browser directly to the cli-init endpoint
+        // This will set up the OAuth flow with our CLI state embedded
         const webAppUrl = 'https://www.supastate.ai';
-        const initResponse = await fetch(`${webAppUrl}/api/auth/cli-init?port=${port}`, {
-          method: 'GET',
-          headers: {
-            'Content-Type': 'application/json',
-          },
-        });
+        const authInitUrl = `${webAppUrl}/api/auth/cli-init?port=${port}`;
         
-        if (!initResponse.ok) {
-          throw new Error('Failed to initialize authentication');
-        }
-        
-        const { authUrl } = await initResponse.json() as any;
-        
-        if (!authUrl) {
-          throw new Error('No authentication URL received');
-        }
-        
-        console.log(chalk.gray(`[DEBUG] Generated auth URL: ${authUrl}`));
-        console.log(chalk.gray(`Opening browser for authentication...`));
-        await open(authUrl);
+        console.log(chalk.gray(`[DEBUG] Auth URL: ${authInitUrl}`));
+        await open(authInitUrl);
         
         console.log(chalk.gray(`Waiting for authentication...`));
-        console.log(chalk.gray(`If the browser doesn't open, visit: ${authUrl}`));
+        console.log(chalk.gray(`If the browser doesn't open, visit: ${authInitUrl}`));
         
         // Wait for authentication
         const result = await authPromise;
