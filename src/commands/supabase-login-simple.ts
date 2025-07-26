@@ -61,41 +61,26 @@ export function createSupabaseLoginSimpleCommand(): Command {
         const configManager = new ConfigManager();
         const config = configManager.getConfig();
         
-        if (data.action === 'created') {
-          // New API key created
+        if (data.accessToken && data.refreshToken) {
+          // JWT tokens received
           configManager.updateConfig({
             supastate: {
               ...config.supastate,
               enabled: true,
               url: options.url,
-              apiKey: data.apiKey,
+              accessToken: data.accessToken,
+              refreshToken: data.refreshToken,
+              expiresAt: data.expiresAt,
               userId: data.userId,
               email: data.email,
             },
           });
           
-          console.log(chalk.green('✅ API key created and saved'));
+          console.log(chalk.green('✅ Authentication successful'));
           console.log(chalk.gray(`Logged in as: ${data.email}`));
-          
-          // Show the API key once
-          console.log(chalk.yellow('\n⚠️  Your API key (save this - it won\'t be shown again):'));
-          console.log(chalk.cyan(data.apiKey));
+          console.log(chalk.gray(`Session expires: ${new Date(data.expiresAt * 1000).toLocaleString()}`));
         } else {
-          // Existing API key
-          console.log(chalk.yellow('⚠️  You already have an API key for Camille'));
-          console.log(chalk.gray('To generate a new key, please revoke the existing one in Supastate dashboard'));
-          console.log(chalk.gray(`Logged in as: ${data.email}`));
-          
-          // Update config with user info
-          configManager.updateConfig({
-            supastate: {
-              ...config.supastate,
-              enabled: true,
-              url: options.url,
-              userId: data.userId,
-              email: data.email,
-            },
-          });
+          throw new Error('No authentication tokens received');
         }
         
         console.log(chalk.cyan('\n🚀 Supastate integration is ready!'));

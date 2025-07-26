@@ -54,7 +54,10 @@ export interface CamilleConfig {
   supastate?: {
     enabled: boolean;
     url?: string;
-    apiKey?: string;
+    apiKey?: string; // Legacy - for backward compatibility
+    accessToken?: string; // JWT access token
+    refreshToken?: string; // JWT refresh token
+    expiresAt?: number; // Unix timestamp when access token expires
     teamId?: string;
     userId?: string;
     email?: string;

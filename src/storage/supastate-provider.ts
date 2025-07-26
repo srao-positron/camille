@@ -12,7 +12,6 @@ import * as fs from 'fs';
 
 export class SupastateStorageProvider {
   private baseUrl: string;
-  private apiKey: string;
   private config: ConfigManager;
   private pendingChunks: Map<string, MemoryChunk[]> = new Map();
   private pendingFiles: Map<string, CodeFile[]> = new Map();
@@ -24,15 +23,67 @@ export class SupastateStorageProvider {
     this.config = new ConfigManager();
     const supastate = this.config.getConfig().supastate;
     
-    if (!supastate?.url || !supastate?.apiKey) {
-      throw new Error('Supastate not configured');
+    if (!supastate?.url || !supastate?.accessToken) {
+      throw new Error('Supastate not configured or not authenticated');
     }
     
     this.baseUrl = supastate.url;
-    this.apiKey = supastate.apiKey;
     
     // Start flush timer
     this.startFlushTimer();
+  }
+
+  /**
+   * Get current access token, refreshing if needed
+   */
+  private async getAccessToken(): Promise<string> {
+    const supastate = this.config.getConfig().supastate;
+    
+    if (!supastate?.accessToken || !supastate?.refreshToken) {
+      throw new Error('No authentication tokens available');
+    }
+    
+    // Check if token is expired
+    const now = Math.floor(Date.now() / 1000);
+    if (supastate.expiresAt && now >= supastate.expiresAt - 60) { // Refresh 1 minute before expiry
+      logger.debug('Access token expired or expiring soon, refreshing...');
+      
+      try {
+        const response = await fetch(`${this.baseUrl}/api/auth/refresh`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify({
+            refreshToken: supastate.refreshToken,
+          }),
+        });
+        
+        if (!response.ok) {
+          throw new Error('Failed to refresh token');
+        }
+        
+        const data = await response.json() as any;
+        
+        // Update stored tokens
+        this.config.updateConfig({
+          supastate: {
+            ...supastate,
+            accessToken: data.accessToken,
+            refreshToken: data.refreshToken,
+            expiresAt: data.expiresAt,
+          },
+        });
+        
+        logger.info('Successfully refreshed access token');
+        return data.accessToken;
+      } catch (error) {
+        logger.error('Failed to refresh token:', error);
+        throw new Error('Authentication expired. Please run "camille supastate login" again.');
+      }
+    }
+    
+    return supastate.accessToken;
   }
 
   /**
@@ -138,13 +189,15 @@ export class SupastateStorageProvider {
    */
   async searchMemories(query: string, limit: number = 20): Promise<SearchResult[]> {
     try {
+      const accessToken = await this.getAccessToken();
+      
       const response = await fetch(`${this.baseUrl}/api/search/memories?` + new URLSearchParams({
         q: query,
         limit: limit.toString(),
         includeProcessing: 'true'
       }), {
         headers: {
-          'Authorization': `Bearer ${this.apiKey}`,
+          'Authorization': `Bearer ${accessToken}`,
         },
       });
 
@@ -189,16 +242,20 @@ export class SupastateStorageProvider {
         // Get project path from first chunk's metadata, fallback to cwd
         const projectPath = chunks[0]?.metadata?.projectPath || process.cwd();
         
-        const response = await fetch(`${this.baseUrl}/api/ingest/memory`, {
+        const accessToken = await this.getAccessToken();
+        
+        const response = await fetch(`${this.baseUrl}/functions/v1/ingest-memory`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${this.apiKey}`,
+            'Authorization': `Bearer ${accessToken}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            sessionId: sid,
-            projectPath: projectPath,
+            workspaceId: 'user:' + (this.config.getConfig().supastate?.userId || 'default'),
+            projectName: path.basename(projectPath),
+            teamId: undefined, // TODO: Add team support
             chunks: chunks.map(c => ({
+              sessionId: sid,
               chunkId: c.chunkId,
               content: c.content,
               metadata: c.metadata,
@@ -255,10 +312,12 @@ export class SupastateStorageProvider {
           gitMetadata: gitMetadata
         }));
         
+        const accessToken = await this.getAccessToken();
+        
         const response = await fetch(`${this.baseUrl}/functions/v1/ingest-code`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${this.apiKey}`,
+            'Authorization': `Bearer ${accessToken}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -321,13 +380,15 @@ export class SupastateStorageProvider {
    */
   async searchCode(query: string, limit: number = 20): Promise<SearchResult[]> {
     try {
+      const accessToken = await this.getAccessToken();
+      
       const response = await fetch(`${this.baseUrl}/api/search/code?` + new URLSearchParams({
         q: query,
         limit: limit.toString(),
         includeProcessing: 'true'
       }), {
         headers: {
-          'Authorization': `Bearer ${this.apiKey}`,
+          'Authorization': `Bearer ${accessToken}`,
         },
       });
 

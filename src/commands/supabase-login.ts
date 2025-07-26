@@ -119,10 +119,10 @@ export function createSupabaseLoginCommand(): Command {
           throw new Error(`Authentication failed: ${result.error}`);
         }
         
-        // Check if we got API key data directly from the callback
+        // Check if we got JWT data directly from the callback
         if (result.apiKeyData) {
           console.log(chalk.green('✅ Authenticated with Supabase'));
-          console.log(chalk.gray('Received API key from Supastate...'));
+          console.log(chalk.gray('Received authentication tokens...'));
           
           // Save configuration
           const configManager = new ConfigManager();
@@ -133,17 +133,20 @@ export function createSupabaseLoginCommand(): Command {
               ...config.supastate,
               enabled: true,
               url: options.url,
-              apiKey: result.apiKeyData.apiKey,
+              accessToken: result.apiKeyData.accessToken,
+              refreshToken: result.apiKeyData.refreshToken,
+              expiresAt: result.apiKeyData.expiresAt,
               userId: result.apiKeyData.userId,
               email: result.apiKeyData.email,
             },
           });
           
-          console.log(chalk.green('✅ API key created and saved'));
+          console.log(chalk.green('✅ Authentication successful'));
           console.log(chalk.gray(`Logged in as: ${result.apiKeyData.email}`));
+          console.log(chalk.gray(`Session expires: ${new Date(result.apiKeyData.expiresAt * 1000).toLocaleString()}`));
         } else {
           // This shouldn't happen with the new flow
-          throw new Error('No API key received from authentication flow');
+          throw new Error('No authentication tokens received from authentication flow');
         }
         
         console.log(chalk.cyan('\n🚀 Supastate integration is ready!'));
