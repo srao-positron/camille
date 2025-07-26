@@ -6,6 +6,9 @@ import { logger } from '../logger.js';
 import { ConfigManager } from '../config.js';
 import { MemoryChunk, CodeFile, SearchResult } from './types.js';
 import fetch from 'node-fetch';
+import { execSync } from 'child_process';
+import * as path from 'path';
+import * as fs from 'fs';
 
 export class SupastateStorageProvider {
   private baseUrl: string;
@@ -30,6 +33,69 @@ export class SupastateStorageProvider {
     
     // Start flush timer
     this.startFlushTimer();
+  }
+
+  /**
+   * Extract Git metadata from a directory
+   */
+  private getGitMetadata(directory: string): any | null {
+    try {
+      // Check if directory is a git repository
+      const gitDir = path.join(directory, '.git');
+      if (!fs.existsSync(gitDir)) {
+        return null;
+      }
+
+      // Get repository URL
+      let repoUrl = '';
+      try {
+        repoUrl = execSync('git config --get remote.origin.url', {
+          cwd: directory,
+          encoding: 'utf8'
+        }).trim();
+      } catch (e) {
+        // No remote configured
+      }
+
+      // Get current branch
+      const branch = execSync('git rev-parse --abbrev-ref HEAD', {
+        cwd: directory,
+        encoding: 'utf8'
+      }).trim();
+
+      // Get latest commit SHA
+      const commitSha = execSync('git rev-parse HEAD', {
+        cwd: directory,
+        encoding: 'utf8'
+      }).trim();
+
+      // Get commit author info
+      const authorInfo = execSync('git log -1 --format="%an|%ae"', {
+        cwd: directory,
+        encoding: 'utf8'
+      }).trim().split('|');
+
+      // Extract repo name from URL
+      let repoName = '';
+      if (repoUrl) {
+        const match = repoUrl.match(/\/([^\/]+?)(\.git)?$/);
+        if (match) {
+          repoName = match[1];
+        }
+      }
+
+      return {
+        repoUrl,
+        repoName,
+        branch,
+        commitSha,
+        author: authorInfo[0] || '',
+        authorEmail: authorInfo[1] || ''
+      };
+    } catch (error) {
+      logger.debug('Failed to extract git metadata:', error);
+      return null;
+    }
   }
 
   /**
@@ -170,29 +236,46 @@ export class SupastateStorageProvider {
       try {
         logger.debug(`Flushing ${files.length} code files for project ${project}`);
         
-        const response = await fetch(`${this.baseUrl}/api/ingest/code`, {
+        // Extract git metadata once for the project
+        const gitMetadata = this.getGitMetadata(project);
+        
+        // Get project name from path
+        const projectName = path.basename(project);
+        
+        // Determine workspace ID (for now, use user workspace)
+        // In a real implementation, this would come from auth context
+        const workspaceId = 'user:' + (this.config.getConfig().userId || 'default');
+        
+        // Prepare files with git metadata
+        const filesWithMetadata = files.map(f => ({
+          path: path.relative(project, f.path), // Make path relative to project
+          content: f.content,
+          language: f.language,
+          lastModified: f.lastModified,
+          gitMetadata: gitMetadata
+        }));
+        
+        const response = await fetch(`${this.baseUrl}/functions/v1/ingest-code`, {
           method: 'POST',
           headers: {
             'Authorization': `Bearer ${this.apiKey}`,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            projectPath: project,
-            files: files.map(f => ({
-              path: f.path,
-              content: f.content,
-              language: f.language,
-              lastModified: f.lastModified,
-            })),
+            workspaceId: workspaceId,
+            projectName: projectName,
+            files: filesWithMetadata,
+            fullSync: false
           }),
         });
 
         if (!response.ok) {
-          throw new Error(`Code ingestion failed: ${response.statusText}`);
+          const errorText = await response.text();
+          throw new Error(`Code ingestion failed: ${response.statusText} - ${errorText}`);
         }
 
         const result = await response.json() as any;
-        logger.info(`Queued ${result.queued} files for processing`);
+        logger.info(`Code ingestion task created: ${result.taskId}, queued ${result.filesQueued} files`);
         
         // Clear flushed files
         this.pendingFiles.delete(project);
