@@ -7,9 +7,10 @@ import * as path from 'path';
 import * as os from 'os';
 import { logger } from '../../logger.js';
 import { ConfigManager } from '../../config.js';
-import { TranscriptProcessor, Message } from '../processors/transcript-processor.js';
+import { TranscriptProcessor, Message, Chunk } from '../processors/transcript-processor.js';
 import { TranscriptMessage } from '../types.js';
 import * as crypto from 'crypto';
+import fetch from 'node-fetch';
 
 /**
  * Raw transcript entry from Claude Code
@@ -86,6 +87,12 @@ export class PreCompactHook {
       if (!config.memory?.enabled || !config.memory?.transcript?.enabled) {
         logger.info('Memory system disabled, skipping transcript processing');
         return;
+      }
+      
+      // Check if Supastate is configured for direct ingestion
+      const useSupastateDirect = config.supastate?.enabled && config.supastate?.url && config.supastate?.accessToken;
+      if (useSupastateDirect) {
+        logger.info('Using direct Supastate ingestion for pre-compact hook');
       }
 
       // Load checkpoints
@@ -186,11 +193,46 @@ export class PreCompactHook {
       };
     }).filter(msg => msg.content);
 
+    // Determine project path - use input.project_path if provided, otherwise extract from messages
+    let projectPath = input.project_path;
+    
+    if (!projectPath) {
+      // Try to find project path from the raw messages
+      for (const msg of newMessages) {
+        if (msg.cwd) {
+          projectPath = msg.cwd;
+          logger.info('Found project path from message cwd', { projectPath });
+          break;
+        }
+      }
+      
+      if (!projectPath) {
+        logger.warn('No project path found in hook input or transcript messages');
+        // We'll skip processing if we can't determine the project
+        return {
+          messages_processed: 0,
+          chunks_created: 0,
+          embeddings_generated: 0,
+          processing_time_ms: 0,
+          error: 'No project path could be determined'
+        };
+      }
+    }
+    
+    // Check if we should use direct Supastate ingestion
+    const config = this.configManager.getConfig();
+    const useSupastateDirect = config.supastate?.enabled && config.supastate?.url && config.supastate?.accessToken;
+    
+    if (useSupastateDirect) {
+      // Direct ingestion to Supastate
+      return await this.ingestToSupastateDirect(processorMessages, input.session_id, projectPath);
+    }
+    
     // Use TranscriptProcessor for chunking, embedding, and storage
     const result = await this.transcriptProcessor.processMessages(
       processorMessages,
       input.session_id,
-      input.project_path,
+      projectPath,
       {
         chunkSize: this.configManager.getConfig().memory?.indexing?.chunkSize || 4000,
         chunkOverlap: this.configManager.getConfig().memory?.indexing?.chunkOverlap || 200,
@@ -349,5 +391,173 @@ export class PreCompactHook {
       logger.error('Failed to save checkpoints', { error });
       throw error;
     }
+  }
+  
+  /**
+   * Ingest messages directly to Supastate
+   */
+  private async ingestToSupastateDirect(
+    messages: Message[],
+    sessionId: string,
+    projectPath: string
+  ): Promise<any> {
+    const startTime = Date.now();
+    const config = this.configManager.getConfig();
+    const supastate = config.supastate!;
+    
+    // Create chunks similar to how TranscriptProcessor does it
+    const chunkSize = config.memory?.indexing?.chunkSize || 4000;
+    const chunkOverlap = config.memory?.indexing?.chunkOverlap || 200;
+    
+    const chunks = [];
+    let currentChunk: Message[] = [];
+    let currentSize = 0;
+    
+    for (const message of messages) {
+      const messageSize = message.content.length;
+      
+      if (currentSize + messageSize > chunkSize && currentChunk.length > 0) {
+        // Create chunk
+        chunks.push(this.createChunkFromMessages(currentChunk, sessionId, projectPath));
+        
+        // Start new chunk with overlap
+        const overlapMessages = [];
+        let overlapSize = 0;
+        for (let i = currentChunk.length - 1; i >= 0; i--) {
+          overlapSize += currentChunk[i].content.length;
+          if (overlapSize > chunkOverlap) break;
+          overlapMessages.unshift(currentChunk[i]);
+        }
+        currentChunk = [...overlapMessages, message];
+        currentSize = overlapSize + messageSize;
+      } else {
+        currentChunk.push(message);
+        currentSize += messageSize;
+      }
+    }
+    
+    // Don't forget the last chunk
+    if (currentChunk.length > 0) {
+      chunks.push(this.createChunkFromMessages(currentChunk, sessionId, projectPath));
+    }
+    
+    // Prepare chunks for Supastate format
+    const supastateChunks = chunks.map((chunk, index) => ({
+      sessionId: sessionId,
+      chunkId: crypto.randomUUID(),
+      content: chunk.text,
+      metadata: {
+        ...chunk.metadata,
+        startTime: chunk.startTime,
+        endTime: chunk.endTime,
+        messageCount: chunk.messageCount,
+        hasCode: false,
+        projectPath: projectPath,
+        chunkIndex: index,
+        source: 'precompact-hook'
+      }
+    }));
+    
+    try {
+      // Get access token (may need to refresh)
+      let accessToken = supastate.accessToken;
+      
+      // Check if token might be expired
+      const now = Math.floor(Date.now() / 1000);
+      if (supastate.expiresAt && now >= supastate.expiresAt - 60) {
+        // Try to refresh token
+        logger.debug('Access token expired or expiring soon, attempting refresh...');
+        
+        const supabaseUrl = supastate.supabaseUrl || (supastate.url || '').replace('https://service.supastate.ai', 'https://zqlfxakbkwssxfynrmnk.supabase.co');
+        const refreshResponse = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=refresh_token`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'apikey': supastate.supabaseAnonKey || '',
+          },
+          body: JSON.stringify({
+            refresh_token: supastate.refreshToken,
+          }),
+        });
+        
+        if (refreshResponse.ok) {
+          const data = await refreshResponse.json() as any;
+          accessToken = data.access_token;
+          
+          // Update config with new tokens
+          this.configManager.updateConfig({
+            supastate: {
+              ...supastate,
+              accessToken: data.access_token,
+              refreshToken: data.refresh_token,
+              expiresAt: Math.floor(Date.now() / 1000) + (data.expires_in || 3600),
+            },
+          });
+        } else {
+          logger.warn('Failed to refresh token, using existing token');
+        }
+      }
+      
+      // Send to Supastate ingest-memory endpoint
+      const response = await fetch(`${supastate.url || 'https://service.supastate.ai'}/functions/v1/ingest-memory`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${accessToken}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          projectName: path.basename(projectPath),
+          chunks: supastateChunks,
+        }),
+      });
+      
+      if (!response.ok) {
+        const errorText = await response.text();
+        throw new Error(`Supastate ingestion failed: ${response.statusText} - ${errorText}`);
+      }
+      
+      const result = await response.json() as any;
+      
+      logger.info('Successfully ingested to Supastate', {
+        chunksProcessed: result.processed || chunks.length,
+        processingTimeMs: Date.now() - startTime
+      });
+      
+      return {
+        messages_processed: messages.length,
+        chunks_created: chunks.length,
+        embeddings_generated: chunks.length,
+        processing_time_ms: Date.now() - startTime,
+        supastate_ingestion: true
+      };
+    } catch (error) {
+      logger.error('Direct Supastate ingestion failed', { error });
+      throw error;
+    }
+  }
+  
+  /**
+   * Create a chunk object from messages
+   */
+  private createChunkFromMessages(
+    messages: Message[],
+    sessionId: string,
+    projectPath: string
+  ): Chunk {
+    const text = messages.map(m => `${m.role}: ${m.content}`).join('\n\n');
+    
+    return {
+      id: crypto.randomUUID(),
+      messages,
+      text,
+      startTime: messages[0].timestamp,
+      endTime: messages[messages.length - 1].timestamp,
+      messageCount: messages.length,
+      tokenCount: Math.ceil(text.length / 4), // Rough estimate
+      metadata: {
+        sessionId,
+        projectPath,
+      }
+    };
   }
 }

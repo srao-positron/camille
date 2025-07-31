@@ -159,7 +159,9 @@ export class SupastateSyncService {
         
         for (const chunk of exportedChunks) {
           const projectPath = chunk.projectPath || 'unknown';
-          const projectName = path.basename(projectPath);
+          // Use the full directory name as project name, not just the basename
+          // This preserves names like "maxwell-edison" instead of splitting them
+          const projectName = projectPath === 'unknown' ? 'unknown' : path.basename(projectPath);
           
           if (!chunksByProject.has(projectName)) {
             chunksByProject.set(projectName, []);

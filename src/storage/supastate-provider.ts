@@ -258,13 +258,16 @@ export class SupastateStorageProvider {
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            projectName: path.basename(projectPath),
+            projectName: chunks[0]?.metadata?.projectName || path.basename(projectPath),
             teamId: undefined, // TODO: Add team support
             chunks: chunks.map(c => ({
               sessionId: sid,
               chunkId: c.chunkId,
               content: c.content,
-              metadata: c.metadata,
+              metadata: {
+                ...c.metadata,
+                projectName: c.metadata?.projectName || path.basename(projectPath)
+              },
             })),
           }),
         });

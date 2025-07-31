@@ -1454,7 +1454,7 @@ export class CamilleServer {
         this.indexQueue.add(async () => {
           // Check if file needs indexing (use cache if available)
           if (this.embeddingsIndex.needsReindex(file)) {
-            await this.indexFile(file);
+            await this.indexFile(file, directory);
           } else {
             skipped++;
             logger.debug('Using cached embedding', { path: file });
@@ -1529,7 +1529,7 @@ export class CamilleServer {
       if (this.fileFilter.shouldIndex(filePath)) {
         consoleOutput.debug(`File changed: ${path.relative(directory, filePath)}`);
         logger.info('File change detected', { path: filePath, directory });
-        this.indexQueue.add(() => this.reindexFile(filePath));
+        this.indexQueue.add(() => this.reindexFile(filePath, directory));
       }
     });
     
@@ -1538,7 +1538,7 @@ export class CamilleServer {
       if (this.fileFilter.shouldIndex(filePath)) {
         consoleOutput.debug(`File added: ${path.relative(directory, filePath)}`);
         logger.info('New file detected', { path: filePath, directory });
-        this.indexQueue.add(() => this.indexFile(filePath));
+        this.indexQueue.add(() => this.indexFile(filePath, directory));
       }
     });
     
@@ -1553,7 +1553,7 @@ export class CamilleServer {
   /**
    * Indexes a single file
    */
-  private async indexFile(filePath: string): Promise<void> {
+  private async indexFile(filePath: string, projectPath?: string): Promise<void> {
     try {
       const content = fs.readFileSync(filePath, 'utf8');
       
@@ -1578,8 +1578,20 @@ export class CamilleServer {
         const ext = path.extname(filePath).substring(1);
         const language = ext || 'plaintext';
         
+        // Determine which watched directory this file belongs to
+        if (!projectPath) {
+          for (const watchedDir of this.getWatchedDirectories()) {
+            if (filePath.startsWith(watchedDir)) {
+              projectPath = watchedDir;
+              break;
+            }
+          }
+          // Fallback to current directory if not in a watched directory
+          projectPath = projectPath || process.cwd();
+        }
+        
         // Send to Supastate for processing
-        await this.supastateProvider.addCodeFile(process.cwd(), {
+        await this.supastateProvider.addCodeFile(projectPath, {
           path: filePath,
           content: content,
           language: language,
@@ -1735,10 +1747,10 @@ export class CamilleServer {
   /**
    * Re-indexes a file if needed
    */
-  private async reindexFile(filePath: string): Promise<void> {
+  private async reindexFile(filePath: string, projectPath?: string): Promise<void> {
     if (this.embeddingsIndex.needsReindex(filePath)) {
       logger.info('File needs re-indexing', { path: filePath });
-      await this.indexFile(filePath);
+      await this.indexFile(filePath, projectPath);
     } else {
       logger.debug('File unchanged, skipping re-index', { path: filePath });
     }
@@ -1919,6 +1931,16 @@ export class CamilleServer {
         }
         
         const content = fs.readFileSync(filePath, 'utf8');
+        
+        // Determine which watched directory this file belongs to
+        let projectPath: string | undefined;
+        for (const watchedDir of this.getWatchedDirectories()) {
+          if (filePath.startsWith(watchedDir)) {
+            projectPath = watchedDir;
+            break;
+          }
+        }
+        
         await this.parseAndIndexCodeStructure(filePath, content);
       } catch (error) {
         logger.error('Failed to re-parse file for edges', { filePath, error });
@@ -1988,22 +2010,40 @@ export class CamilleServer {
           const basename = path.basename(transcriptPath, '.jsonl');
           const sessionId = basename;
           
-          // Read the first line to get the project path (cwd)
-          const firstLine = await this.readFirstLine(transcriptPath);
+          // Read JSONL file and find the project path (cwd) from any entry
           let projectPath: string | undefined;
           
           try {
-            const firstEntry = JSON.parse(firstLine);
-            projectPath = firstEntry.cwd || firstEntry.project_path;
-          } catch (parseError) {
-            logger.warn('Could not parse first line of transcript to get project path', { transcriptPath });
+            const content = await fs.promises.readFile(transcriptPath, 'utf8');
+            const lines = content.split('\n').filter(line => line.trim());
+            
+            // Parse each line and look for one with a cwd property
+            for (const line of lines) {
+              try {
+                const entry = JSON.parse(line);
+                if (entry.cwd) {
+                  projectPath = entry.cwd;
+                  logger.info('Found project path from cwd in transcript', { 
+                    transcriptPath, 
+                    projectPath 
+                  });
+                  break;
+                }
+              } catch (e) {
+                // This line wasn't valid JSON, continue to next
+              }
+            }
+          } catch (error) {
+            logger.error('Failed to read transcript file', { transcriptPath, error });
           }
           
-          // If we couldn't get the project path from the file, try to infer it
           if (!projectPath) {
-            // Extract from directory name (format: -Users-srao-camille -> /Users/srao/camille)
-            const dirName = path.basename(path.dirname(transcriptPath));
-            projectPath = dirName.replace(/^-/, '/').replace(/-/g, '/');
+            logger.warn('Could not find cwd in transcript, will NOT use directory name', { 
+              transcriptPath 
+            });
+            // Skip this transcript if we can't determine the project path from cwd
+            // This prevents using incorrect project names like "-Users-srao-openai-hook"
+            continue;
           }
 
           logger.info(`Indexing transcript for session ${sessionId} in project ${projectPath}`);
