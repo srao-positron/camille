@@ -1,6 +1,8 @@
 # Camille - An Automated Agent That Partners With Claude Code to Provide Semantic (Vector Embedding), Pattern, and Syntactic Search, in the Cloud With [Supastate](https://www.supastate.ai/)
 
 ## Now with support for [Supastate](https://www.supastate.ai/) (alpha)
+<img width="600" height="315" alt="image" src="https://github.com/user-attachments/assets/57b1b29b-0043-4424-82b0-6fd9e5fcac86" />
+<br />
 https://www.supastate.ai/
 <br />
 Read the Substack [here](https://www.srao.blog/p/supastate-the-amnesia-epidemic-how)
