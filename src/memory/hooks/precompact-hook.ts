@@ -82,15 +82,15 @@ export class PreCompactHook {
         reason: input.compaction_reason
       });
 
-      // Check if memory is enabled
+      // Check if memory is enabled or Supastate is configured
       const config = this.configManager.getConfig();
-      if (!config.memory?.enabled || !config.memory?.transcript?.enabled) {
-        logger.info('Memory system disabled, skipping transcript processing');
+      const useSupastateDirect = config.supastate?.enabled && config.supastate?.url && (config.supastate?.accessToken || config.supastate?.apiKey);
+      
+      // Skip only if both memory system is disabled AND Supastate is not configured
+      if (!config.memory?.enabled && !config.memory?.transcript?.enabled && !useSupastateDirect) {
+        logger.info('Memory system and Supastate both disabled, skipping transcript processing');
         return;
       }
-      
-      // Check if Supastate is configured for direct ingestion
-      const useSupastateDirect = config.supastate?.enabled && config.supastate?.url && config.supastate?.accessToken;
       if (useSupastateDirect) {
         logger.info('Using direct Supastate ingestion for pre-compact hook');
       }
@@ -221,7 +221,7 @@ export class PreCompactHook {
     
     // Check if we should use direct Supastate ingestion
     const config = this.configManager.getConfig();
-    const useSupastateDirect = config.supastate?.enabled && config.supastate?.url && config.supastate?.accessToken;
+    const useSupastateDirect = config.supastate?.enabled && config.supastate?.url && (config.supastate?.accessToken || config.supastate?.apiKey);
     
     if (useSupastateDirect) {
       // Direct ingestion to Supastate

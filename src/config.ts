@@ -112,6 +112,27 @@ export class ConfigManager {
   }
 
   /**
+   * Deep merge two objects
+   */
+  private deepMerge(target: any, source: any): any {
+    const output = { ...target };
+    
+    for (const key in source) {
+      if (source.hasOwnProperty(key)) {
+        if (source[key] && typeof source[key] === 'object' && !Array.isArray(source[key])) {
+          // If it's an object (but not an array), merge recursively
+          output[key] = this.deepMerge(target[key] || {}, source[key]);
+        } else {
+          // Otherwise, just copy the value
+          output[key] = source[key];
+        }
+      }
+    }
+    
+    return output;
+  }
+
+  /**
    * Ensures the configuration directory exists
    */
   private ensureConfigDir(): void {
@@ -134,7 +155,8 @@ export class ConfigManager {
     if (fs.existsSync(this.configPath)) {
       try {
         const fileConfig = JSON.parse(fs.readFileSync(this.configPath, 'utf8'));
-        config = { ...config, ...fileConfig };
+        // Deep merge to preserve nested objects like supastate
+        config = this.deepMerge(config, fileConfig);
       } catch (error) {
         // Don't log error if it's just a missing file
         if (fs.existsSync(this.configDir)) {

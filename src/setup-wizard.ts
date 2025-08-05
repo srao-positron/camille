@@ -1659,6 +1659,8 @@ WantedBy=default.target`;
     
     try {
       execSync('camille supastate login', { stdio: 'inherit' });
+      // Add a small delay to ensure config file is written
+      await new Promise(resolve => setTimeout(resolve, 1000));
     } catch (execError) {
       // Check if login actually succeeded by checking the config
       // Create a new ConfigManager instance to get fresh config from disk
@@ -1666,6 +1668,8 @@ WantedBy=default.target`;
       const config = freshConfigManager.getConfig();
       
       console.log(chalk.gray('\nDebug: Checking config after execSync error...'));
+      console.log(chalk.gray(`  Config path: ${freshConfigManager.getConfigPath()}`));
+      console.log(chalk.gray(`  Config dir: ${freshConfigManager.getConfigDir()}`));
       console.log(chalk.gray(`  enabled: ${config.supastate?.enabled}`));
       console.log(chalk.gray(`  apiKey: ${config.supastate?.apiKey ? 'present' : 'missing'}`));
       console.log(chalk.gray(`  accessToken: ${config.supastate?.accessToken ? 'present' : 'missing'}`));
@@ -1682,6 +1686,8 @@ WantedBy=default.target`;
     const freshConfigManager = new ConfigManager();
     const config = freshConfigManager.getConfig();
     console.log(chalk.gray('\nDebug: Checking Supastate config...'));
+    console.log(chalk.gray(`  Config path: ${freshConfigManager.getConfigPath()}`));
+    console.log(chalk.gray(`  Config dir: ${freshConfigManager.getConfigDir()}`));
     console.log(chalk.gray(`  enabled: ${config.supastate?.enabled}`));
     console.log(chalk.gray(`  apiKey: ${config.supastate?.apiKey ? 'present' : 'missing'}`));
     console.log(chalk.gray(`  accessToken: ${config.supastate?.accessToken ? 'present' : 'missing'}`));
@@ -1793,13 +1799,14 @@ WantedBy=default.target`;
     const spinner = ora('Applying configuration...').start();
     
     try {
-      // Update configuration with directories
+      // Re-read the config to get the Supastate settings from login
+      const freshConfigManager = new ConfigManager();
+      const currentConfig = freshConfigManager.getConfig();
+      
+      // Update configuration with directories while preserving Supastate settings
       this.configManager.updateConfig({
         watchedDirectories: directories,
-        supastate: {
-          ...this.configManager.getConfig().supastate,
-          enabled: true
-        }
+        supastate: currentConfig.supastate || { enabled: true }
       });
 
       // Set up auto-start if requested

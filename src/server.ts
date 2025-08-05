@@ -1958,10 +1958,13 @@ export class CamilleServer {
     try {
       logger.info('Starting to index existing Claude transcripts');
       
-      // Check if memory is enabled
+      // Check if memory is enabled or Supastate is configured
       const config = this.configManager.getConfig();
-      if (!config.memory?.enabled || !config.memory?.transcript?.enabled) {
-        logger.info('Memory system disabled, skipping transcript indexing');
+      const useSupastateDirect = config.supastate?.enabled && config.supastate?.url && (config.supastate?.accessToken || config.supastate?.apiKey);
+      
+      // Skip only if both memory system is disabled AND Supastate is not configured
+      if (!config.memory?.enabled && !config.memory?.transcript?.enabled && !useSupastateDirect) {
+        logger.info('Memory system and Supastate both disabled, skipping transcript indexing');
         return;
       }
 
@@ -2048,17 +2051,44 @@ export class CamilleServer {
 
           logger.info(`Indexing transcript for session ${sessionId} in project ${projectPath}`);
 
-          // Process the transcript
-          const result = await processor.processTranscript(
-            transcriptPath,
-            sessionId,
-            projectPath,
-            {
-              chunkSize: config.memory?.indexing?.chunkSize || 4000,
-              chunkOverlap: config.memory?.indexing?.chunkOverlap || 200,
-              embeddingModel: config.memory?.indexing?.embeddingModel || 'text-embedding-3-large'
-            }
-          );
+          let result;
+          if (useSupastateDirect) {
+            // For Supastate, we need to read and process the transcript directly
+            logger.info('Using direct Supastate ingestion for existing transcript');
+            
+            // Import PreCompactHook to reuse its ingestion logic
+            const { PreCompactHook } = await import('./memory/hooks/precompact-hook.js');
+            const hook = new PreCompactHook();
+            
+            // Create a mock input object similar to what the hook expects
+            const mockInput = {
+              session_id: sessionId,
+              transcript_path: transcriptPath,
+              hook_event_name: 'PreCompact' as const,
+              trigger: 'startup-indexing',
+              project_path: projectPath,
+              compaction_reason: 'manual' as const
+            };
+            
+            // Process using the hook's method
+            const stats = await hook['processTranscript'](mockInput);
+            result = {
+              chunks: stats.chunks_created || 0,
+              embeddings: stats.embeddings_generated || 0
+            };
+          } else {
+            // Use local TranscriptProcessor
+            result = await processor.processTranscript(
+              transcriptPath,
+              sessionId,
+              projectPath,
+              {
+                chunkSize: config.memory?.indexing?.chunkSize || 4000,
+                chunkOverlap: config.memory?.indexing?.chunkOverlap || 200,
+                embeddingModel: config.memory?.indexing?.embeddingModel || 'text-embedding-3-large'
+              }
+            );
+          }
           
           // Mark as indexed in checkpoint
           checkpointManager.markIndexed(transcriptPath, result.chunks);
