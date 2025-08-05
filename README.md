@@ -4,10 +4,10 @@
 <img width="600" height="315" alt="image" src="https://github.com/user-attachments/assets/57b1b29b-0043-4424-82b0-6fd9e5fcac86" />
 <br />
 <br />
-### https://www.supastate.ai/
+** https://www.supastate.ai/
 <br />
 <br />
-### Read the Substack [here](https://www.srao.blog/p/supastate-the-amnesia-epidemic-how)
+** Read the Substack [here](https://www.srao.blog/p/supastate-the-amnesia-epidemic-how)
 <br />
 <br />
 Sign up for Supastate and install Camille (<code>npm install claude-camille</code>). After you install Camille and set it up (<code>camille setup</code>) - just run <code>camille supastate login</code>!
