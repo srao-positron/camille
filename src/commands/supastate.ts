@@ -255,6 +255,7 @@ export function createSupastateCommand(): Command {
         console.log(`  Enabled: ${chalk.green('Yes')}`);
         console.log(`  URL: ${chalk.cyan(config.supastate.url || 'Not set')}`);
         console.log(`  Workspace: ${config.supastate.teamId ? chalk.cyan(`Team ${config.supastate.teamId}`) : chalk.cyan('Personal')}`);
+        console.log(`  Auth Type: ${config.supastate.apiKey ? chalk.green('API Key') : config.supastate.accessToken ? chalk.yellow('JWT (Legacy)') : chalk.red('None')}`);
         console.log(`  Auto-sync: ${config.supastate.autoSync ? chalk.green('Enabled') : chalk.gray('Disabled')}`);
         
         if (config.supastate.syncInterval) {
@@ -374,6 +375,8 @@ export function createSupastateCommand(): Command {
         process.exit(1);
       }
     });
+
+  // Removed refresh-token command - we now use API keys which don't expire
 
   return supastate;
 }

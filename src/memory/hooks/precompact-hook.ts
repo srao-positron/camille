@@ -459,52 +459,23 @@ export class PreCompactHook {
     }));
     
     try {
-      // Get access token (may need to refresh)
-      let accessToken = supastate.accessToken;
+      // Get authentication header
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+      };
       
-      // Check if token might be expired
-      const now = Math.floor(Date.now() / 1000);
-      if (supastate.expiresAt && now >= supastate.expiresAt - 60) {
-        // Try to refresh token
-        logger.debug('Access token expired or expiring soon, attempting refresh...');
-        
-        const supabaseUrl = supastate.supabaseUrl || (supastate.url || '').replace('https://service.supastate.ai', 'https://zqlfxakbkwssxfynrmnk.supabase.co');
-        const refreshResponse = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=refresh_token`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'apikey': supastate.supabaseAnonKey || '',
-          },
-          body: JSON.stringify({
-            refresh_token: supastate.refreshToken,
-          }),
-        });
-        
-        if (refreshResponse.ok) {
-          const data = await refreshResponse.json() as any;
-          accessToken = data.access_token;
-          
-          // Update config with new tokens
-          this.configManager.updateConfig({
-            supastate: {
-              ...supastate,
-              accessToken: data.access_token,
-              refreshToken: data.refresh_token,
-              expiresAt: Math.floor(Date.now() / 1000) + (data.expires_in || 3600),
-            },
-          });
-        } else {
-          logger.warn('Failed to refresh token, using existing token');
-        }
+      if (supastate.apiKey) {
+        headers['X-Supastate-Auth'] = supastate.apiKey;
+      } else if (supastate.accessToken) {
+        headers['Authorization'] = `Bearer ${supastate.accessToken}`;
+      } else {
+        throw new Error('No authentication credentials available');
       }
       
       // Send to Supastate ingest-memory endpoint
       const response = await fetch(`${supastate.url || 'https://service.supastate.ai'}/functions/v1/ingest-memory`, {
         method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${accessToken}`,
-          'Content-Type': 'application/json',
-        },
+        headers,
         body: JSON.stringify({
           projectName: path.basename(projectPath),
           chunks: supastateChunks,

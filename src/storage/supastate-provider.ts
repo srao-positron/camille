@@ -23,7 +23,7 @@ export class SupastateStorageProvider {
     this.config = new ConfigManager();
     const supastate = this.config.getConfig().supastate;
     
-    if (!supastate?.url || !supastate?.accessToken) {
+    if (!supastate?.url || (!supastate?.apiKey && !supastate?.accessToken)) {
       throw new Error('Supastate not configured or not authenticated');
     }
     
@@ -34,63 +34,23 @@ export class SupastateStorageProvider {
   }
 
   /**
-   * Get current access token, refreshing if needed
+   * Get authentication header value (API key or access token)
    */
-  private async getAccessToken(): Promise<string> {
+  private async getAuthHeader(): Promise<{ key: string; value: string }> {
     const supastate = this.config.getConfig().supastate;
     
-    if (!supastate?.accessToken || !supastate?.refreshToken) {
-      throw new Error('No authentication tokens available');
+    // Prefer API key over access token
+    if (supastate?.apiKey) {
+      return { key: 'X-Supastate-Auth', value: supastate.apiKey };
     }
     
-    // Check if token is expired
-    const now = Math.floor(Date.now() / 1000);
-    if (supastate.expiresAt && now >= supastate.expiresAt - 60) { // Refresh 1 minute before expiry
-      logger.debug('Access token expired or expiring soon, refreshing...');
-      
-      try {
-        // Use Supabase auth refresh endpoint
-        const supabaseUrl = supastate.supabaseUrl || this.baseUrl.replace('service.supastate.ai', 'https://pkwzimgcvjqhsbkmdlec.supabase.co');
-        const response = await fetch(`${supabaseUrl}/auth/v1/token?grant_type=refresh_token`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'apikey': supastate.supabaseAnonKey || '', // Need anon key for refresh
-          },
-          body: JSON.stringify({
-            refresh_token: supastate.refreshToken,
-          }),
-        });
-        
-        if (!response.ok) {
-          const errorData = await response.text();
-          logger.error('Refresh token response:', errorData);
-          throw new Error('Failed to refresh token');
-        }
-        
-        const data = await response.json() as any;
-        
-        // Update stored tokens
-        this.config.updateConfig({
-          supastate: {
-            ...supastate,
-            accessToken: data.access_token,
-            refreshToken: data.refresh_token,
-            expiresAt: Math.floor(Date.now() / 1000) + (data.expires_in || 3600),
-            supabaseUrl: supastate.supabaseUrl, // Preserve Supabase URL
-            supabaseAnonKey: supastate.supabaseAnonKey, // Preserve anon key
-          },
-        });
-        
-        logger.info('Successfully refreshed access token');
-        return data.access_token;
-      } catch (error) {
-        logger.error('Failed to refresh token:', error);
-        throw new Error('Authentication expired. Please run "camille supastate login" again.');
-      }
+    // Fallback to JWT token for backward compatibility
+    if (supastate?.accessToken) {
+      logger.debug('Using legacy JWT authentication. Consider re-authenticating to use API keys.');
+      return { key: 'Authorization', value: `Bearer ${supastate.accessToken}` };
     }
     
-    return supastate.accessToken;
+    throw new Error('No authentication credentials available. Please run "camille supastate login" again.');
   }
 
   /**
@@ -196,7 +156,7 @@ export class SupastateStorageProvider {
    */
   async searchMemories(query: string, limit: number = 20): Promise<SearchResult[]> {
     try {
-      const accessToken = await this.getAccessToken();
+      const auth = await this.getAuthHeader();
       
       const response = await fetch(`${this.baseUrl}/api/search/memories?` + new URLSearchParams({
         q: query,
@@ -204,7 +164,7 @@ export class SupastateStorageProvider {
         includeProcessing: 'true'
       }), {
         headers: {
-          'Authorization': `Bearer ${accessToken}`,
+          [auth.key]: auth.value,
         },
       });
 
@@ -249,12 +209,12 @@ export class SupastateStorageProvider {
         // Get project path from first chunk's metadata, fallback to cwd
         const projectPath = chunks[0]?.metadata?.projectPath || process.cwd();
         
-        const accessToken = await this.getAccessToken();
+        const auth = await this.getAuthHeader();
         
         const response = await fetch(`${this.baseUrl}/functions/v1/ingest-memory`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${accessToken}`,
+            [auth.key]: auth.value,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -317,12 +277,12 @@ export class SupastateStorageProvider {
           gitMetadata: gitMetadata
         }));
         
-        const accessToken = await this.getAccessToken();
+        const auth = await this.getAuthHeader();
         
         const response = await fetch(`${this.baseUrl}/functions/v1/ingest-code`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${accessToken}`,
+            [auth.key]: auth.value,
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
@@ -384,7 +344,7 @@ export class SupastateStorageProvider {
    */
   async searchCode(query: string, limit: number = 20): Promise<SearchResult[]> {
     try {
-      const accessToken = await this.getAccessToken();
+      const auth = await this.getAuthHeader();
       
       const response = await fetch(`${this.baseUrl}/api/search/code?` + new URLSearchParams({
         q: query,
@@ -392,7 +352,7 @@ export class SupastateStorageProvider {
         includeProcessing: 'true'
       }), {
         headers: {
-          'Authorization': `Bearer ${accessToken}`,
+          [auth.key]: auth.value,
         },
       });
 

@@ -103,24 +103,35 @@ export function createSupabaseLoginCommand(): Command {
           const configManager = new ConfigManager();
           const config = configManager.getConfig();
           
+          // Check if we received an API key or JWT tokens
+          const isApiKey = result.apiKeyData.apiKey || 
+                          (result.apiKeyData.accessToken && result.apiKeyData.accessToken.startsWith('sk_'));
+          
           configManager.updateConfig({
             supastate: {
               ...config.supastate,
               enabled: true,
               url: 'https://service.supastate.ai', // Always use the API URL for edge functions
-              accessToken: result.apiKeyData.accessToken,
-              refreshToken: result.apiKeyData.refreshToken,
-              expiresAt: result.apiKeyData.expiresAt,
+              // Store API key if provided, otherwise fall back to accessToken
+              apiKey: result.apiKeyData.apiKey || (isApiKey ? result.apiKeyData.accessToken : undefined),
+              // Only store JWT tokens if not an API key
+              accessToken: !isApiKey ? result.apiKeyData.accessToken : undefined,
+              refreshToken: !isApiKey ? result.apiKeyData.refreshToken : undefined,
+              expiresAt: !isApiKey ? result.apiKeyData.expiresAt : undefined,
               userId: result.apiKeyData.userId,
               email: result.apiKeyData.email,
-              supabaseUrl: result.apiKeyData.supabaseUrl,
+              supabaseUrl: result.apiKeyData.supabaseUrl || 'https://zqlfxakbkwssxfynrmnk.supabase.co',
               supabaseAnonKey: result.apiKeyData.supabaseAnonKey,
             },
           });
           
           console.log(chalk.green('✅ Authentication successful'));
           console.log(chalk.gray(`Logged in as: ${result.apiKeyData.email}`));
-          console.log(chalk.gray(`Session expires: ${new Date(result.apiKeyData.expiresAt * 1000).toLocaleString()}`));
+          if (isApiKey) {
+            console.log(chalk.gray('Using API key authentication (no expiration)'));
+          } else {
+            console.log(chalk.gray(`Session expires: ${new Date(result.apiKeyData.expiresAt * 1000).toLocaleString()}`));
+          }
         } else {
           // This shouldn't happen with the new flow
           throw new Error('No authentication tokens received from authentication flow');

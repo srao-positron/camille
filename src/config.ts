@@ -54,12 +54,12 @@ export interface CamilleConfig {
   supastate?: {
     enabled: boolean;
     url?: string;
-    apiKey?: string; // Legacy - for backward compatibility
-    accessToken?: string; // JWT access token
-    refreshToken?: string; // JWT refresh token
-    expiresAt?: number; // Unix timestamp when access token expires
-    supabaseUrl?: string; // Supabase project URL for token refresh
-    supabaseAnonKey?: string; // Supabase anon key for token refresh
+    apiKey?: string; // API key for authentication
+    accessToken?: string; // Legacy JWT token (for backward compatibility)
+    refreshToken?: string; // Legacy JWT refresh token (deprecated)
+    expiresAt?: number; // Legacy expiration (deprecated)
+    supabaseUrl?: string; // Legacy (deprecated)
+    supabaseAnonKey?: string; // Legacy (deprecated)
     teamId?: string;
     userId?: string;
     email?: string;
