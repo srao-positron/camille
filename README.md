@@ -1,5 +1,9 @@
 # Camille - An Automated Agent That Partners With Claude Code
 
+## Now with support for [Supastate](https://www.supastate.ai/) (alpha)
+https://www.supastate.ai/
+Read the Substack [here](https://www.srao.blog/p/supastate-the-amnesia-epidemic-how)
+
 An intelligent code compliance checker and embedding search tool for Claude Code that uses Anthropic Claude or OpenAI to validate code changes against project rules, security best practices, and architectural decisions.
 <br />
 <br />
