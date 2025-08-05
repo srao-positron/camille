@@ -277,7 +277,7 @@ server
       console.log(chalk.gray('Log files:'));
       console.log(chalk.gray('  - MCP Server: /tmp/camille-mcp-server.log'));
       console.log(chalk.gray('  - Python Proxy: /tmp/camille-proxy.log'));
-      console.log(chalk.gray('  - General: /tmp/camille.log'));
+      console.log(chalk.gray('  - General: ~/.camille/logs/camille.log'));
     } catch (error) {
       console.error(chalk.red('Error restarting server:', error));
       process.exit(1);
@@ -773,7 +773,7 @@ function showMCPHelp() {
   
   console.log(chalk.yellow('Troubleshooting:'));
   console.log('• Ensure Camille is installed globally: npm install -g camille');
-  console.log('• Check logs at: /tmp/camille.log');
+  console.log('• Check logs at: ~/.camille/logs/camille.log');
   console.log('• Verify API key is set: camille config show');
   console.log('• API key is loaded from ~/.camille/config.json automatically\n');
   

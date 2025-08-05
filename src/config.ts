@@ -176,9 +176,14 @@ export class ConfigManager {
 
   /**
    * Gets the API key for the current provider
-   * @throws Error if API key is not set
+   * @throws Error if API key is not set and Supastate is not enabled
    */
   public getApiKey(): string {
+    // If Supastate is enabled, we don't need local API keys
+    if (this.config.supastate?.enabled) {
+      return 'supastate-managed';
+    }
+    
     const provider = this.config.provider || 'openai'; // Default to openai for backward compatibility
     
     if (provider === 'anthropic') {
@@ -196,9 +201,14 @@ export class ConfigManager {
 
   /**
    * Gets the OpenAI API key (for embeddings)
-   * @throws Error if API key is not set
+   * @throws Error if API key is not set and Supastate is not enabled
    */
   public getOpenAIApiKey(): string {
+    // If Supastate is enabled, embeddings are done server-side
+    if (this.config.supastate?.enabled) {
+      return 'supastate-managed';
+    }
+    
     if (!this.config.openaiApiKey) {
       throw new Error('OpenAI API key not configured. Required for embeddings. Run "camille config set-key openai <key>" or set OPENAI_API_KEY environment variable.');
     }

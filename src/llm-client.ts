@@ -35,21 +35,30 @@ export class LLMClient {
     this.workingDirectory = workingDirectory;
     this.embeddingsIndex = embeddingsIndex;
     
-    // Create main provider
-    const provider = config.provider || 'openai';
-    const apiKey = provider === 'anthropic' ? config.anthropicApiKey : config.openaiApiKey;
-    
-    if (!apiKey) {
-      throw new Error(`${provider} API key not configured`);
+    // If Supastate is enabled, skip local provider setup
+    if (config.supastate?.enabled) {
+      // Create a dummy provider that won't be used
+      this.provider = createProvider({
+        provider: 'openai',
+        apiKey: 'supastate-managed'
+      });
+    } else {
+      // Create main provider
+      const provider = config.provider || 'openai';
+      const apiKey = provider === 'anthropic' ? config.anthropicApiKey : config.openaiApiKey;
+      
+      if (!apiKey) {
+        throw new Error(`${provider} API key not configured`);
+      }
+      
+      this.provider = createProvider({
+        provider,
+        apiKey
+      });
     }
     
-    this.provider = createProvider({
-      provider,
-      apiKey
-    });
-    
-    // Always create OpenAI provider for embeddings
-    if (config.openaiApiKey) {
+    // Create OpenAI provider for embeddings if available and Supastate is not enabled
+    if (!config.supastate?.enabled && config.openaiApiKey) {
       this.openaiProvider = createProvider({
         provider: 'openai',
         apiKey: config.openaiApiKey
@@ -57,10 +66,11 @@ export class LLMClient {
     }
     
     logger.debug('LLM client initialized', { 
-      provider,
+      provider: config.supastate?.enabled ? 'supastate' : (config.provider || 'openai'),
       models: config.models,
       workingDirectory,
-      hasEmbeddingsIndex: !!embeddingsIndex
+      hasEmbeddingsIndex: !!embeddingsIndex,
+      supastateEnabled: config.supastate?.enabled || false
     });
   }
 
@@ -68,6 +78,12 @@ export class LLMClient {
    * Generates embeddings (always uses OpenAI)
    */
   async generateEmbedding(text: string): Promise<number[]> {
+    // If Supastate is enabled, embeddings are handled server-side
+    if (this.config.supastate?.enabled) {
+      // Return a dummy embedding - actual embeddings happen on Supastate server
+      return new Array(1536).fill(0);
+    }
+    
     if (!this.openaiProvider || !this.openaiProvider.generateEmbedding) {
       throw new Error('OpenAI API key required for embeddings');
     }

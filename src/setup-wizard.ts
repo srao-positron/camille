@@ -1543,7 +1543,7 @@ WantedBy=default.target`;
     message += chalk.gray('   • Start server manually: ') + chalk.cyan('camille server start') + '\n';
     message += chalk.gray('   • Check status: ') + chalk.cyan('camille server status') + '\n';
     message += chalk.gray('   • View configuration: ') + chalk.cyan('camille config show') + '\n';
-    message += chalk.gray('   • View logs: ') + chalk.cyan('tail -f /tmp/camille.log') + '\n';
+    message += chalk.gray('   • View logs: ') + chalk.cyan('tail -f ~/.camille/logs/camille.log') + '\n';
     
     if (!config.mcp?.enabled || (config.mcp as any)?.manualSetup) {
       message += '\n' + chalk.yellow('4. Add MCP to a project later:\n');
@@ -1661,7 +1661,15 @@ WantedBy=default.target`;
       execSync('camille supastate login', { stdio: 'inherit' });
     } catch (execError) {
       // Check if login actually succeeded by checking the config
-      const config = this.configManager.getConfig();
+      // Create a new ConfigManager instance to get fresh config from disk
+      const freshConfigManager = new ConfigManager();
+      const config = freshConfigManager.getConfig();
+      
+      console.log(chalk.gray('\nDebug: Checking config after execSync error...'));
+      console.log(chalk.gray(`  enabled: ${config.supastate?.enabled}`));
+      console.log(chalk.gray(`  apiKey: ${config.supastate?.apiKey ? 'present' : 'missing'}`));
+      console.log(chalk.gray(`  accessToken: ${config.supastate?.accessToken ? 'present' : 'missing'}`));
+      
       if (!config.supastate?.enabled || (!config.supastate?.apiKey && !config.supastate?.accessToken)) {
         console.error(chalk.red('\nSupastate login failed. Please try again.'));
         throw new Error('Supastate login was not completed successfully');
@@ -1669,8 +1677,15 @@ WantedBy=default.target`;
       // If config is valid, login succeeded despite the exit code
     }
     
-    // Re-check that login was successful
-    const config = this.configManager.getConfig();
+    // Re-check that login was successful by creating a new ConfigManager instance
+    // to ensure we get the latest config from disk
+    const freshConfigManager = new ConfigManager();
+    const config = freshConfigManager.getConfig();
+    console.log(chalk.gray('\nDebug: Checking Supastate config...'));
+    console.log(chalk.gray(`  enabled: ${config.supastate?.enabled}`));
+    console.log(chalk.gray(`  apiKey: ${config.supastate?.apiKey ? 'present' : 'missing'}`));
+    console.log(chalk.gray(`  accessToken: ${config.supastate?.accessToken ? 'present' : 'missing'}`));
+    
     if (!config.supastate?.enabled || (!config.supastate?.apiKey && !config.supastate?.accessToken)) {
       console.error(chalk.red('\nSupastate login failed. Please try again.'));
       throw new Error('Supastate login was not completed successfully');
@@ -1694,16 +1709,49 @@ WantedBy=default.target`;
       throw new Error('Claude Code CLI not found');
     }
 
-    const spinner = ora('Adding Supastate MCP server to Claude Code...').start();
+    const spinner = ora('Configuring MCP servers...').start();
     
     try {
-      // Add Supastate MCP server using SSE transport
-      execSync('claude mcp add -t sse https://www.supastate.ai/sse', { stdio: 'pipe' });
-      spinner.succeed('Supastate MCP server added successfully');
+      // First, remove any existing Supastate and Camille MCP servers at both user and local levels
+      spinner.text = 'Removing existing MCP servers...';
+      
+      // Remove Supastate (SSE server) at user level
+      try {
+        execSync('claude mcp remove --scope user supastate', { stdio: 'pipe' });
+      } catch {
+        // Ignore errors - server might not exist
+      }
+      
+      // Remove Supastate (SSE server) at local level
+      try {
+        execSync('claude mcp remove --scope local supastate', { stdio: 'pipe' });
+      } catch {
+        // Ignore errors - server might not exist
+      }
+      
+      // Remove Camille (stdio server) at user level
+      try {
+        execSync('claude mcp remove --scope user camille', { stdio: 'pipe' });
+      } catch {
+        // Ignore errors - server might not exist
+      }
+      
+      // Remove Camille (stdio server) at local level
+      try {
+        execSync('claude mcp remove --scope local camille', { stdio: 'pipe' });
+      } catch {
+        // Ignore errors - server might not exist
+      }
+      
+      spinner.text = 'Adding Supastate MCP server...';
+      
+      // Add Supastate MCP server using SSE transport at user scope
+      execSync('claude mcp add --scope user -t sse supastate https://www.supastate.ai/sse', { stdio: 'pipe' });
+      spinner.succeed('Supastate MCP server added successfully at user level');
     } catch (error) {
       spinner.fail('Failed to add Supastate MCP server');
       console.log(chalk.yellow('\nYou can manually add it later with:'));
-      console.log(chalk.gray('claude mcp add -t sse https://www.supastate.ai/sse'));
+      console.log(chalk.gray('claude mcp add --scope user -t sse supastate https://www.supastate.ai/sse'));
       // Don't throw - this is optional
     }
   }
@@ -1811,7 +1859,7 @@ WantedBy=default.target`;
       '\n' +
       chalk.yellow('Useful commands:\n') +
       chalk.gray('  • Check status: ') + chalk.cyan('camille server status') + '\n' +
-      chalk.gray('  • View logs: ') + chalk.cyan('tail -f /tmp/camille.log'),
+      chalk.gray('  • View logs: ') + chalk.cyan('tail -f ~/.camille/logs/camille.log'),
       {
         padding: 1,
         margin: 1,
