@@ -81,53 +81,102 @@ export class SetupWizard {
       // Start setup process
       this.logger.info('Starting Camille setup wizard');
       
-      // Step 1: Configure LLM provider and models
-      const providerConfig = await this.setupProviderAndModels();
-      
-      // Step 2: Select directories to monitor
-      const directories = await this.selectDirectories();
-      
-      // Step 3: Configure MCP integration
-      const mcpConfig = await this.setupMCP();
-      
-      // Step 4: Configure Claude Code hooks
-      const hooksConfig = await this.setupHooks();
-      
-      // Step 5: Configure memory system
-      const memoryConfig = await this.setupMemory();
-      
-      // Step 6: System service setup
-      const serviceConfig = await this.setupSystemService();
-      
-      // Step 7: Review and confirm
-      await this.reviewConfiguration({
-        provider: providerConfig.provider,
-        models: providerConfig.models,
-        apiKeys: {
-          anthropic: providerConfig.apiKeys.anthropic ? '***' + providerConfig.apiKeys.anthropic.slice(-4) : undefined,
-          openai: providerConfig.apiKeys.openai ? '***' + providerConfig.apiKeys.openai.slice(-4) : undefined
-        },
-        directories,
-        mcpConfig,
-        hooksConfig,
-        memoryConfig,
-        serviceConfig
-      });
+      // Check if user wants Supastate setup
+      const { isSupastateUser } = await inquirer.prompt([{
+        type: 'confirm',
+        name: 'isSupastateUser',
+        message: 'Are you a Supastate user?',
+        default: true
+      }]);
 
-      // Apply configuration
-      await this.applyConfiguration(providerConfig, directories, mcpConfig, hooksConfig, memoryConfig, serviceConfig);
-
-      // Test the setup
-      await this.testSetup();
-
-      // Show success message and start server
-      await this.showSuccess();
+      if (isSupastateUser) {
+        // Supastate-specific setup flow
+        await this.runSupastateSetup();
+      } else {
+        // Standard setup flow
+        await this.runStandardSetup();
+      }
 
     } catch (error) {
       this.logger.error('Setup wizard failed', error);
       console.error(chalk.red('\n❌ Setup failed:'), error);
       process.exit(1);
     }
+  }
+
+  /**
+   * Runs the Supastate-specific setup flow
+   */
+  private async runSupastateSetup(): Promise<void> {
+    console.log(chalk.blue('\n🚀 Supastate Setup\n'));
+    console.log(chalk.gray('This will set up Camille with Supastate integration for enhanced collaboration.\n'));
+
+    // Step 1: Select directories to watch
+    const directories = await this.selectSupastateDirectories();
+
+    // Step 2: Supastate login
+    console.log(chalk.blue('\n🔐 Supastate Authentication\n'));
+    await this.runSupastateLogin();
+
+    // Step 3: Add Supastate MCP server
+    console.log(chalk.blue('\n🔌 Adding Supastate MCP Server\n'));
+    await this.addSupastateMCPServer();
+
+    // Step 4: Ask about startup preferences
+    const startupConfig = await this.askSupastateStartupPreferences();
+
+    // Apply Supastate configuration
+    await this.applySupastateConfiguration(directories, startupConfig);
+
+    // Show Supastate success message
+    await this.showSupastateSuccess();
+  }
+
+  /**
+   * Runs the standard setup flow (existing implementation)
+   */
+  private async runStandardSetup(): Promise<void> {
+    // Step 1: Configure LLM provider and models
+    const providerConfig = await this.setupProviderAndModels();
+    
+    // Step 2: Select directories to monitor
+    const directories = await this.selectDirectories();
+    
+    // Step 3: Configure MCP integration
+    const mcpConfig = await this.setupMCP();
+    
+    // Step 4: Configure Claude Code hooks
+    const hooksConfig = await this.setupHooks();
+    
+    // Step 5: Configure memory system
+    const memoryConfig = await this.setupMemory();
+    
+    // Step 6: System service setup
+    const serviceConfig = await this.setupSystemService();
+    
+    // Step 7: Review and confirm
+    await this.reviewConfiguration({
+      provider: providerConfig.provider,
+      models: providerConfig.models,
+      apiKeys: {
+        anthropic: providerConfig.apiKeys.anthropic ? '***' + providerConfig.apiKeys.anthropic.slice(-4) : undefined,
+        openai: providerConfig.apiKeys.openai ? '***' + providerConfig.apiKeys.openai.slice(-4) : undefined
+      },
+      directories,
+      mcpConfig,
+      hooksConfig,
+      memoryConfig,
+      serviceConfig
+    });
+
+    // Apply configuration
+    await this.applyConfiguration(providerConfig, directories, mcpConfig, hooksConfig, memoryConfig, serviceConfig);
+
+    // Test the setup
+    await this.testSetup();
+
+    // Show success message and start server
+    await this.showSuccess();
   }
 
   /**
@@ -1528,6 +1577,250 @@ WantedBy=default.target`;
       return '~' + dirPath.slice(home.length);
     }
     return dirPath;
+  }
+
+  /**
+   * Select directories for Supastate setup
+   */
+  private async selectSupastateDirectories(): Promise<string[]> {
+    console.log(chalk.blue('📁 Directory Selection\n'));
+    console.log(chalk.gray('Select which directories Camille should watch for code changes.\n'));
+
+    const directories: string[] = [];
+    let addMore = true;
+
+    while (addMore) {
+      const { dirChoice } = await inquirer.prompt([{
+        type: 'list',
+        name: 'dirChoice',
+        message: 'How would you like to add directories?',
+        choices: [
+          { name: 'Current directory', value: 'current' },
+          { name: 'Browse and select directory', value: 'browse' },
+          { name: 'Enter path with wildcards (e.g., ~/projects/*)', value: 'wildcard' },
+          { name: 'Enter specific path', value: 'manual' },
+          ...(directories.length > 0 ? [{ name: 'Done adding directories', value: 'done' }] : [])
+        ]
+      }]);
+
+      if (dirChoice === 'done') {
+        addMore = false;
+        continue;
+      }
+
+      let selectedDirs: string[] = [];
+
+      switch (dirChoice) {
+        case 'current':
+          selectedDirs = [process.cwd()];
+          break;
+        case 'browse':
+          selectedDirs = await this.browseDirectory();
+          break;
+        case 'wildcard':
+          selectedDirs = await this.selectWithWildcard();
+          break;
+        case 'manual':
+          selectedDirs = [await this.enterManualPath()];
+          break;
+      }
+
+      // Validate directories
+      for (const dir of selectedDirs) {
+        const absPath = path.resolve(dir);
+        if (fs.existsSync(absPath) && fs.statSync(absPath).isDirectory()) {
+          if (!directories.includes(absPath)) {
+            directories.push(absPath);
+            console.log(chalk.green(`✓ Added: ${absPath}`));
+          } else {
+            console.log(chalk.yellow(`⚠ Already added: ${absPath}`));
+          }
+        } else {
+          console.log(chalk.red(`✗ Invalid directory: ${dir}`));
+        }
+      }
+
+      if (directories.length > 0) {
+        console.log(chalk.gray(`\nCurrently watching ${directories.length} director${directories.length === 1 ? 'y' : 'ies'}`));
+      }
+    }
+
+    return directories;
+  }
+
+  /**
+   * Run Supastate login process
+   */
+  private async runSupastateLogin(): Promise<void> {
+    const { execSync } = require('child_process');
+    
+    // Run the Supastate login command
+    console.log(chalk.gray('Opening your browser for Supastate authentication...\n'));
+    
+    try {
+      execSync('camille supastate login', { stdio: 'inherit' });
+    } catch (execError) {
+      // Check if login actually succeeded by checking the config
+      const config = this.configManager.getConfig();
+      if (!config.supastate?.enabled || (!config.supastate?.apiKey && !config.supastate?.accessToken)) {
+        console.error(chalk.red('\nSupastate login failed. Please try again.'));
+        throw new Error('Supastate login was not completed successfully');
+      }
+      // If config is valid, login succeeded despite the exit code
+    }
+    
+    // Re-check that login was successful
+    const config = this.configManager.getConfig();
+    if (!config.supastate?.enabled || (!config.supastate?.apiKey && !config.supastate?.accessToken)) {
+      console.error(chalk.red('\nSupastate login failed. Please try again.'));
+      throw new Error('Supastate login was not completed successfully');
+    }
+    
+    console.log(chalk.green('\n✓ Supastate authentication successful'));
+  }
+
+  /**
+   * Add Supastate MCP server to Claude
+   */
+  private async addSupastateMCPServer(): Promise<void> {
+    const { execSync } = require('child_process');
+    
+    try {
+      // Check if claude command is available
+      execSync('claude --version', { stdio: 'ignore' });
+    } catch {
+      console.error(chalk.red('Error: Claude Code CLI not found. Please install Claude Code first.'));
+      console.log(chalk.gray('Visit: https://docs.anthropic.com/en/docs/claude-code/quickstart'));
+      throw new Error('Claude Code CLI not found');
+    }
+
+    const spinner = ora('Adding Supastate MCP server to Claude Code...').start();
+    
+    try {
+      // Add Supastate MCP server using SSE transport
+      execSync('claude mcp add -t sse https://www.supastate.ai/sse', { stdio: 'pipe' });
+      spinner.succeed('Supastate MCP server added successfully');
+    } catch (error) {
+      spinner.fail('Failed to add Supastate MCP server');
+      console.log(chalk.yellow('\nYou can manually add it later with:'));
+      console.log(chalk.gray('claude mcp add -t sse https://www.supastate.ai/sse'));
+      // Don't throw - this is optional
+    }
+  }
+
+  /**
+   * Ask Supastate startup preferences
+   */
+  private async askSupastateStartupPreferences(): Promise<{
+    startAtLogin: boolean;
+    startNow: boolean;
+  }> {
+    console.log(chalk.blue('\n⚙️  Startup Preferences\n'));
+
+    const answers = await inquirer.prompt([
+      {
+        type: 'confirm',
+        name: 'startAtLogin',
+        message: 'Would you like Camille to start automatically when you log in?',
+        default: true
+      },
+      {
+        type: 'confirm',
+        name: 'startNow',
+        message: 'Would you like to start Camille now?',
+        default: true
+      }
+    ]);
+
+    return answers;
+  }
+
+  /**
+   * Apply Supastate configuration
+   */
+  private async applySupastateConfiguration(
+    directories: string[],
+    startupConfig: { startAtLogin: boolean; startNow: boolean }
+  ): Promise<void> {
+    const spinner = ora('Applying configuration...').start();
+    
+    try {
+      // Update configuration with directories
+      this.configManager.updateConfig({
+        watchedDirectories: directories,
+        supastate: {
+          ...this.configManager.getConfig().supastate,
+          enabled: true
+        }
+      });
+
+      // Set up auto-start if requested
+      if (startupConfig.startAtLogin) {
+        const platform = os.platform();
+        if (platform === 'darwin') {
+          await this.createLaunchdService(directories);
+        } else if (platform === 'linux') {
+          await this.createSystemdService(directories);
+        } else {
+          console.log(chalk.yellow('\nAuto-start is not supported on your platform'));
+        }
+      }
+
+      spinner.succeed('Configuration applied successfully');
+    } catch (error) {
+      spinner.fail('Failed to apply configuration');
+      throw error;
+    }
+
+    // Start Camille if requested
+    if (startupConfig.startNow) {
+      console.log(chalk.blue('\n🚀 Starting Camille...\n'));
+      try {
+        const { execSync } = require('child_process');
+        execSync('nohup camille server start > /dev/null 2>&1 &', { shell: true });
+        
+        // Give it a moment to start
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        console.log(chalk.green('✓ Camille started successfully'));
+      } catch (error) {
+        console.log(chalk.yellow('⚠ Could not start Camille automatically'));
+        console.log(chalk.gray('You can start it manually with: camille server start'));
+      }
+    }
+  }
+
+  /**
+   * Show Supastate success message
+   */
+  private async showSupastateSuccess(): Promise<void> {
+    const config = this.configManager.getConfig();
+    
+    const message = boxen(
+      chalk.green('✅ Supastate Setup Complete!\n\n') +
+      chalk.white('What\'s configured:\n') +
+      chalk.gray(`  ✓ Watching ${config.watchedDirectories?.length || 0} directories\n`) +
+      chalk.gray('  ✓ Authenticated with Supastate\n') +
+      chalk.gray('  ✓ Supastate MCP server added to Claude Code\n') +
+      (config.autoStart?.enabled ? chalk.gray('  ✓ Auto-start enabled\n') : '') +
+      '\n' +
+      chalk.white('Next steps:\n') +
+      chalk.gray('  • Open Claude Code in any watched directory\n') +
+      chalk.gray('  • Your code will be automatically indexed\n') +
+      chalk.gray('  • Use Supastate tools to search and analyze your codebase\n') +
+      '\n' +
+      chalk.yellow('Useful commands:\n') +
+      chalk.gray('  • Check status: ') + chalk.cyan('camille server status') + '\n' +
+      chalk.gray('  • View logs: ') + chalk.cyan('tail -f /tmp/camille.log'),
+      {
+        padding: 1,
+        margin: 1,
+        borderStyle: 'round',
+        borderColor: 'green'
+      }
+    );
+
+    console.log(message);
   }
 }
 

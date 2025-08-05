@@ -1,6 +1,6 @@
 {
   "name": "claude-camille",
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "An intelligent code compliance checker and embedding search tool for Claude Code",
   "main": "dist/index.js",
   "bin": {
@@ -82,5 +82,6 @@
     "scripts/**/*",
     "bin/**/*",
     "mcp-pipe-proxy.py"
-  ]
+  ],
+  "packageManager": "yarn@1.22.19+sha1.4ba7fc5c6e704fce2066ecbfb0b0d8976fe62447"
 }
