@@ -6,6 +6,10 @@
 https://www.supastate.ai/
 <br />
 Read the Substack [here](https://www.srao.blog/p/supastate-the-amnesia-epidemic-how)
+<br />
+Sign up for Supastate and install Camille (npm install claude-camille). After you install Camille and set it up (camille setup) - just run camille supastate login!
+<br />
+<hr />
 
 An intelligent code compliance checker and embedding search tool for Claude Code that uses Anthropic Claude or OpenAI to validate code changes against project rules, security best practices, and architectural decisions.
 <br />

@@ -1,6 +1,6 @@
 {
   "name": "claude-camille",
-  "version": "0.3.3",
+  "version": "0.4.0",
   "description": "An intelligent code compliance checker and embedding search tool for Claude Code",
   "main": "dist/index.js",
   "bin": {
