@@ -1,4 +1,4 @@
-# Camille - An Automated Agent That Partners With Claude Code
+# Camille - An Automated Agent That Partners With Claude Code to Provide Semantic (Vector Embedding), Pattern, and Syntactic Search, in the Cloud With Supastate
 
 ## Now with support for [Supastate](https://www.supastate.ai/) (alpha)
 https://www.supastate.ai/
