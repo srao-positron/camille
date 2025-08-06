@@ -226,15 +226,19 @@ export class ConfigManager {
    * @throws Error if API key is not set and Supastate is not enabled
    */
   public getOpenAIApiKey(): string {
-    // If Supastate is enabled, embeddings are done server-side
-    if (this.config.supastate?.enabled) {
-      return 'supastate-managed';
+    // Always return the actual OpenAI key if available
+    // Even with Supastate enabled, we might need it as fallback
+    if (this.config.openaiApiKey) {
+      return this.config.openaiApiKey;
     }
     
-    if (!this.config.openaiApiKey) {
-      throw new Error('OpenAI API key not configured. Required for embeddings. Run "camille config set-key openai <key>" or set OPENAI_API_KEY environment variable.');
+    // If Supastate is enabled and no OpenAI key, that's okay
+    if (this.config.supastate?.enabled) {
+      throw new Error('OpenAI API key not configured. Supastate will handle embeddings server-side.');
     }
-    return this.config.openaiApiKey;
+    
+    // No OpenAI key and no Supastate - this is an error
+    throw new Error('OpenAI API key not configured. Required for embeddings. Run "camille config set-key openai <key>" or set OPENAI_API_KEY environment variable.');
   }
 
   /**

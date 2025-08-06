@@ -87,15 +87,24 @@ export class CamilleServer {
     // Initialize LLM client (always needed for code reviews)
     this.llmClient = new LLMClient(config, process.cwd());
     
-    // Only initialize OpenAI client and embeddings if Supastate is not enabled
-    if (!config.supastate?.enabled) {
+    // Always initialize embeddings index
+    this.embeddingsIndex = new EmbeddingsIndex(this.configManager);
+    
+    // Initialize OpenAI client if we have an API key (even if Supastate is enabled, as fallback)
+    try {
       const openaiApiKey = this.configManager.getOpenAIApiKey();
-      this.openaiClient = new OpenAIClient(openaiApiKey, config, process.cwd());
-      this.embeddingsIndex = new EmbeddingsIndex(this.configManager);
-    } else {
-      logger.info('Supastate enabled - skipping OpenAI client and local embeddings initialization');
-      // Create minimal embeddings index for compatibility
-      this.embeddingsIndex = new EmbeddingsIndex(this.configManager);
+      if (openaiApiKey && openaiApiKey !== 'supastate-managed') {
+        this.openaiClient = new OpenAIClient(openaiApiKey, config, process.cwd());
+        logger.info('OpenAI client initialized');
+      } else if (!config.supastate?.enabled) {
+        logger.warn('No OpenAI API key configured and Supastate not enabled');
+      }
+    } catch (error) {
+      if (!config.supastate?.enabled) {
+        logger.error('Failed to initialize OpenAI client and Supastate not enabled:', error);
+      } else {
+        logger.info('OpenAI client not initialized - will use Supastate for embeddings');
+      }
     }
     
     this.graphDB = new KuzuGraphDB();
