@@ -176,12 +176,23 @@ export class BrowserService {
       if (this.isShuttingDown) return;
       
       try {
-        // Count active sessions
+        // Count active sessions that have been updated in the last 5 minutes
+        // Sessions without recent activity are considered stale
+        const fiveMinutesAgo = new Date(Date.now() - 5 * 60 * 1000).toISOString();
         const { count: activeSessions } = await this.supabase!
           .from('browser_sessions')
           .select('*', { count: 'exact', head: true })
           .eq('machine_id', this.machineId)
-          .eq('status', 'active');
+          .eq('status', 'active')
+          .gte('updated_at', fiveMinutesAgo);
+        
+        // Mark stale sessions as failed (sessions not updated in 5 minutes)
+        await this.supabase!
+          .from('browser_sessions')
+          .update({ status: 'failed' })
+          .eq('machine_id', this.machineId)
+          .eq('status', 'active')
+          .lt('updated_at', fiveMinutesAgo);
         
         // Update heartbeat and capabilities
         await this.supabase!.rpc('update_browser_machine_heartbeat', {
@@ -879,6 +890,12 @@ export class BrowserService {
       
       // Update command status using Edge Function
       await this.updateCommandStatus(command.id, 'completed');
+      
+      // Update session's updated_at to keep it active
+      await this.supabase!
+        .from('browser_sessions')
+        .update({ updated_at: new Date().toISOString() })
+        .eq('id', command.session_id);
     } catch (err) {
       // Provide detailed error information for the API to understand what went wrong
       if (err instanceof Error) {
