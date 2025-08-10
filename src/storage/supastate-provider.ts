@@ -298,7 +298,13 @@ export class SupastateStorageProvider {
         }
 
         const result = await response.json() as any;
-        logger.info(`Code ingestion task created: ${result.taskId}, queued ${result.filesQueued} files`);
+        logger.debug('Code ingestion response:', result);
+        
+        // Handle different response formats
+        const taskId = result.taskId || result.task_id || result.id || 'unknown';
+        const filesQueued = result.filesQueued || result.files_queued || files.length;
+        
+        logger.info(`Code ingestion task created: ${taskId}, queued ${filesQueued} files`);
         
         // Clear flushed files
         this.pendingFiles.delete(project);

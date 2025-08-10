@@ -18,7 +18,7 @@ import { runHook } from './hook';
 import { runSetupWizard } from './setup-wizard';
 import { logger } from './logger';
 import { getModelsForProvider, getRecommendedModels, LLMProvider } from './providers';
-import { createSupastateCommand } from './commands/index';
+import { createSupastateCommand, browserCommand } from './commands/index';
 
 const pkg = JSON.parse(fs.readFileSync(path.join(__dirname, '..', 'package.json'), 'utf8'));
 
@@ -627,6 +627,7 @@ program
  * Supastate command
  */
 program.addCommand(createSupastateCommand());
+program.addCommand(browserCommand);
 
 /**
  * Init MCP command

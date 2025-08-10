@@ -8,6 +8,7 @@
 const fs = require('fs');
 const path = require('path');
 const os = require('os');
+const { execSync } = require('child_process');
 
 console.log('🔧 Setting up Camille...');
 
@@ -23,6 +24,19 @@ const promptsDir = path.join(configDir, 'prompts');
 if (!fs.existsSync(promptsDir)) {
   fs.mkdirSync(promptsDir, { recursive: true });
   console.log('✅ Created prompts directory');
+}
+
+// Install Playwright browsers for browser automation
+console.log('\n🌐 Installing browser automation support...');
+try {
+  execSync('npx playwright install chromium', { 
+    stdio: 'inherit',
+    cwd: process.cwd()
+  });
+  console.log('✅ Browser automation ready');
+} catch (error) {
+  console.warn('⚠️  Failed to install browser automation support');
+  console.warn('   To enable browser automation later, run: npx playwright install chromium');
 }
 
 // Instructions for setup

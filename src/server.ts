@@ -31,6 +31,7 @@ import { LanceEmbeddingStore } from './memory/lance-embedding-store.js';
 import { PipelineManager } from './memory/pipeline-manager.js';
 import { SupastateSyncService } from './services/supastate-sync.js';
 import { SupastateStorageProvider } from './storage/supastate-provider.js';
+import { BrowserService } from './services/browser-service.js';
 
 /**
  * Server status
@@ -79,6 +80,7 @@ export class CamilleServer {
   private parsedFiles: any[] = [];
   private supastateSyncService?: SupastateSyncService;
   private supastateProvider?: SupastateStorageProvider;
+  private browserService?: BrowserService;
 
   constructor() {
     this.configManager = new ConfigManager();
@@ -258,6 +260,21 @@ export class CamilleServer {
     // Start the named pipe server IMMEDIATELY for MCP communication
     await this.startPipeServer();
     consoleOutput.info(chalk.green('✅ MCP server ready - accepting connections'));
+    
+    // Start browser automation service IMMEDIATELY if Supastate is enabled
+    if (config.supastate?.enabled) {
+      // Don't await - let it start in background
+      (async () => {
+        try {
+          this.browserService = new BrowserService();
+          await this.browserService.start();
+          consoleOutput.info(chalk.green('✅ Browser automation service started'));
+        } catch (error) {
+          logger.error('Failed to start browser service', { error });
+          consoleOutput.warning(chalk.yellow('⚠️  Browser automation service unavailable'));
+        }
+      })();
+    }
     
     // Start the REST API server
     try {
@@ -469,6 +486,16 @@ export class CamilleServer {
         consoleOutput.info(chalk.gray('API server stopped'));
       } catch (error) {
         logger.error('Failed to stop API server', { error });
+      }
+    }
+    
+    // Stop browser service
+    if (this.browserService) {
+      try {
+        await this.browserService.stop();
+        consoleOutput.info(chalk.gray('Browser service stopped'));
+      } catch (error) {
+        logger.error('Failed to stop browser service', { error });
       }
     }
     
