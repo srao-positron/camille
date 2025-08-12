@@ -19,6 +19,16 @@ interface ActiveSession {
   sessionId: string;
   url: string;
   createdAt: Date;
+  harPath?: string;
+  networkRequests: Array<{
+    url: string;
+    method: string;
+    status?: number;
+    responseTime?: number;
+    size?: number;
+    headers?: Record<string, string>;
+    timestamp: string;
+  }>;
 }
 
 export class BrowserService {
@@ -406,13 +416,20 @@ export class BrowserService {
           throw new Error('Session not found');
         }
         
-        // Create new browser context
+        // Create HAR file path for this session
+        const harPath = path.join(this.screenshotDir, `session-${command.session_id}.har`);
+        
+        // Create new browser context with HAR recording
         const context = await this.browser!.newContext({
           viewport: sessionData.viewport as { width: number; height: number } || { width: 1280, height: 720 },
-          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+          recordHar: { path: harPath, mode: 'full' }
         });
         
         const page = await context.newPage();
+        
+        // Initialize network requests array
+        const networkRequests: ActiveSession['networkRequests'] = [];
         
         // Capture console logs
         page.on('console', msg => {
@@ -423,12 +440,39 @@ export class BrowserService {
           });
         });
         
+        // Capture network requests
+        page.on('request', request => {
+          networkRequests.push({
+            url: request.url(),
+            method: request.method(),
+            headers: request.headers(),
+            timestamp: new Date().toISOString()
+          });
+        });
+        
+        // Capture network responses
+        page.on('response', response => {
+          const reqIndex = networkRequests.findIndex(r => r.url === response.url() && !r.status);
+          if (reqIndex !== -1) {
+            networkRequests[reqIndex].status = response.status();
+            networkRequests[reqIndex].responseTime = Date.now() - new Date(networkRequests[reqIndex].timestamp).getTime();
+            // Try to get response size if available
+            response.body().then(body => {
+              networkRequests[reqIndex].size = body.length;
+            }).catch(() => {
+              // Ignore if we can't get body size
+            });
+          }
+        });
+        
         session = {
           context,
           page,
           sessionId: command.session_id,
           url: sessionData.url,
-          createdAt: new Date()
+          createdAt: new Date(),
+          harPath,
+          networkRequests
         };
         
         this.activeSessions.set(command.session_id, session);
@@ -658,6 +702,14 @@ export class BrowserService {
         // Format: captureDOM() - No-op, DOM is captured automatically after every command
         logger.info('CaptureDOM command (automatic DOM capture will be performed)');
         
+      } else if (action === 'close' || action === 'closesession') {
+        // Format: close or closeSession - Close the browser session and upload HAR
+        logger.info('Closing browser session and uploading HAR file');
+        await this.closeSession(command.session_id, true);
+        success = true;
+        // Skip further processing since session is closed
+        return;
+        
       } else {
         logger.warn(`Unknown command action: ${action}`);
         throw new Error(`Unknown command action: ${action}`);
@@ -836,10 +888,20 @@ export class BrowserService {
         return elements;
       });
       
+      // Get cookies for current page
+      const cookies = await session.context.cookies();
+      
+      // Get network requests for this command (last 50 or since command started)
+      const commandStartTime = Date.now() - startTime;
+      const recentRequests = session.networkRequests.slice(-50);
+      
       domSnapshot = {
         html: htmlContent,
         interactableElements: interactableElements,
-        url: page.url()
+        url: page.url(),
+        cookies: cookies,
+        consoleLogs: consoleLogs,
+        networkRequests: recentRequests
       };
       
       // Upload DOM snapshot using Edge Function (as JSON now)
@@ -987,6 +1049,79 @@ export class BrowserService {
     }
   }
   
+  private async closeSession(sessionId: string, uploadHar: boolean = true) {
+    const session = this.activeSessions.get(sessionId);
+    if (!session) return;
+    
+    try {
+      // Upload HAR file if it exists and upload is requested
+      if (uploadHar && session.harPath) {
+        try {
+          // Close the context first to ensure HAR file is written
+          await session.context.close();
+          
+          // Wait a bit for HAR file to be written
+          await new Promise(resolve => setTimeout(resolve, 500));
+          
+          // Check if HAR file exists
+          const harExists = await fs.access(session.harPath).then(() => true).catch(() => false);
+          
+          if (harExists) {
+            const harBuffer = await fs.readFile(session.harPath);
+            const harFileName = `${this.realtimeAuth.getUserId()}/${sessionId}/session-complete.har`;
+            
+            logger.info(`Uploading HAR file: ${harFileName} (${harBuffer.length} bytes)`);
+            
+            const config = this.realtimeAuth.getConfig();
+            const supabaseUrl = 'https://zqlfxakbkwssxfynrmnk.supabase.co';
+            
+            const response = await fetch(`${supabaseUrl}/functions/v1/upload-browser-screenshot`, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+                'X-Supastate-Auth': config.supastate?.apiKey || ''
+              },
+              body: JSON.stringify({
+                fileName: harFileName,
+                fileData: harBuffer.toString('base64'),
+                contentType: 'application/json'
+              })
+            });
+            
+            if (response.ok) {
+              const result = await response.json() as { success: boolean, path: string, url: string };
+              logger.info(`HAR file uploaded successfully: ${result.url}`);
+              
+              // Update session with HAR file URL
+              await this.supabase!
+                .from('browser_sessions')
+                .update({ 
+                  har_file_url: result.url,
+                  status: 'closed',
+                  closed_at: new Date().toISOString()
+                })
+                .eq('id', sessionId);
+            } else {
+              logger.error(`Failed to upload HAR file: ${response.statusText}`);
+            }
+            
+            // Clean up local HAR file
+            await fs.unlink(session.harPath).catch(() => {});
+          }
+        } catch (error) {
+          logger.error(`Failed to upload HAR for session ${sessionId}:`, error);
+        }
+      } else {
+        // Just close the context if no HAR upload needed
+        await session.context.close();
+      }
+    } catch (error) {
+      logger.error(`Failed to close session ${sessionId}:`, error);
+    } finally {
+      this.activeSessions.delete(sessionId);
+    }
+  }
+  
   async stop() {
     this.isShuttingDown = true;
     
@@ -1009,13 +1144,9 @@ export class BrowserService {
       this.sseReconnectTimeout = undefined;
     }
     
-    // Close all active browser sessions
+    // Close all active browser sessions with HAR upload
     for (const [sessionId, session] of this.activeSessions) {
-      try {
-        await session.context.close();
-      } catch (error) {
-        logger.error(`Failed to close browser context for session ${sessionId}:`, error);
-      }
+      await this.closeSession(sessionId, true);
     }
     this.activeSessions.clear();
     
