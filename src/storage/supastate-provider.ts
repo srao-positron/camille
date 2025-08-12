@@ -210,6 +210,12 @@ export class SupastateStorageProvider {
         const projectPath = chunks[0]?.metadata?.projectPath || process.cwd();
         
         const auth = await this.getAuthHeader();
+        const supastate = this.config.getConfig().supastate;
+        
+        // FIXED: Use correct workspace model
+        // workspace_id should be null for personal data, actual team ID for team data
+        const workspace_id = supastate?.teamId || null;
+        const user_id = supastate?.userId;
         
         const response = await fetch(`${this.baseUrl}/functions/v1/ingest-memory`, {
           method: 'POST',
@@ -219,7 +225,8 @@ export class SupastateStorageProvider {
           },
           body: JSON.stringify({
             projectName: chunks[0]?.metadata?.projectName || path.basename(projectPath),
-            teamId: undefined, // TODO: Add team support
+            workspace_id: workspace_id,  // null for personal, team ID for team
+            user_id: user_id,
             chunks: chunks.map(c => ({
               sessionId: sid,
               chunkId: c.chunkId,
@@ -278,6 +285,12 @@ export class SupastateStorageProvider {
         }));
         
         const auth = await this.getAuthHeader();
+        const supastate = this.config.getConfig().supastate;
+        
+        // FIXED: Use correct workspace model
+        // workspace_id should be null for personal data, actual team ID for team data
+        const workspace_id = supastate?.teamId || null;
+        const user_id = supastate?.userId;
         
         const response = await fetch(`${this.baseUrl}/functions/v1/ingest-code`, {
           method: 'POST',
@@ -287,6 +300,8 @@ export class SupastateStorageProvider {
           },
           body: JSON.stringify({
             projectName: projectName,
+            workspace_id: workspace_id,  // null for personal, team ID for team
+            user_id: user_id,
             files: filesWithMetadata,
             fullSync: false
           }),

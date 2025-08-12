@@ -888,6 +888,26 @@ export class BrowserService {
       
       success = true;
       
+      // Verify screenshot is accessible before proceeding (to avoid race conditions)
+      if (screenshotUrl && !screenshotUrl.startsWith('data:')) {
+        try {
+          logger.info(`Verifying screenshot is accessible at: ${screenshotUrl}`);
+          const verifyResponse = await fetch(screenshotUrl, { method: 'HEAD' });
+          if (!verifyResponse.ok) {
+            logger.warn(`Screenshot not yet accessible (${verifyResponse.status}), waiting...`);
+            // Wait a bit for CDN propagation
+            await new Promise(resolve => setTimeout(resolve, 1000));
+            // Try once more
+            const retryResponse = await fetch(screenshotUrl, { method: 'HEAD' });
+            if (!retryResponse.ok) {
+              logger.error(`Screenshot still not accessible after retry: ${retryResponse.status}`);
+            }
+          }
+        } catch (error) {
+          logger.warn(`Could not verify screenshot accessibility: ${error}`);
+        }
+      }
+      
       // Update command status using Edge Function
       await this.updateCommandStatus(command.id, 'completed');
       
@@ -957,6 +977,10 @@ export class BrowserService {
       if (!response.ok) {
         const errorText = await response.text();
         logger.error(`Failed to write result for command ${command.id}:`, errorText);
+      } else {
+        logger.info(`Successfully wrote result for command ${command.id} with screenshot: ${screenshotUrl ? 'yes' : 'no'}`);
+        // Small delay to ensure database commit completes before real-time notification
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
     } catch (error) {
       logger.error(`Failed to write result for command ${command.id}:`, error);
