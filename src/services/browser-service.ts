@@ -51,8 +51,8 @@ export class BrowserService {
   private heartbeatInterval?: NodeJS.Timeout;
   private pollingInterval?: NodeJS.Timeout;
   private isShuttingDown = false;
-  private browser?: Browser;
-  private browserType: 'chromium' | 'firefox';
+  private chromiumBrowser?: Browser;
+  private firefoxBrowser?: Browser;
   private activeSessions: Map<string, ActiveSession> = new Map();
   private screenshotDir: string;
   private lastCommandId?: string;
@@ -67,12 +67,11 @@ export class BrowserService {
   private processingCommands: Set<string> = new Set();
   private sessionCleanupInterval?: NodeJS.Timeout;
   
-  constructor(browserType: 'chromium' | 'firefox' = 'chromium') {
+  constructor() {
     // Load or generate machine ID
     this.machineId = this.loadOrGenerateMachineId();
     this.machineName = os.hostname() || `camille-${this.machineId.slice(0, 8)}`;
     this.realtimeAuth = new BrowserRealtimeAuth(this.machineId);
-    this.browserType = browserType;
     
     // Create screenshots directory
     this.screenshotDir = path.join(os.tmpdir(), 'camille-screenshots');
@@ -89,19 +88,13 @@ export class BrowserService {
       // Ensure screenshots directory exists
       await fs.mkdir(this.screenshotDir, { recursive: true });
       
-      // Launch browser based on type
-      logger.info(`Launching ${this.browserType} browser...`);
-      if (this.browserType === 'firefox') {
-        this.browser = await firefox.launch({
-          headless: true
-        });
-      } else {
-        this.browser = await chromium.launch({
-          headless: true,
-          args: ['--no-sandbox', '--disable-setuid-sandbox']
-        });
-      }
-      logger.info(`${this.browserType} browser launched successfully`);
+      // Launch chromium browser (Firefox will be launched on-demand)
+      logger.info('Launching Chromium browser...');
+      this.chromiumBrowser = await chromium.launch({
+        headless: true,
+        args: ['--no-sandbox', '--disable-setuid-sandbox']
+      });
+      logger.info('Chromium browser launched successfully');
       
       // Register this machine
       await this.registerMachine();
@@ -196,7 +189,7 @@ export class BrowserService {
         last_heartbeat: new Date().toISOString(),
         is_active: true,
         capabilities: {
-          browsers: [this.browserType === 'firefox' ? 'firefox' : 'chrome'],
+          browsers: ['chrome', 'firefox'], // We support both
           maxSessions: this.sessionPool.maxConcurrent,
           activeSessions: this.sessionPool.activeCount
         },
@@ -336,7 +329,7 @@ export class BrowserService {
         await this.supabase!.rpc('update_browser_machine_heartbeat', {
           p_machine_id: this.machineId,
           p_capabilities: {
-            browsers: [this.browserType === 'firefox' ? 'firefox' : 'chrome'],
+            browsers: ['chrome', 'firefox'], // We support both
             maxSessions: this.sessionPool.maxConcurrent,
             activeSessions: this.activeSessions.size
           }
@@ -518,6 +511,34 @@ export class BrowserService {
     }
   }
   
+  private async getBrowserForSession(browserType: string): Promise<Browser> {
+    // Normalize browser type
+    const normalizedType = browserType === 'firefox' ? 'firefox' : 'chromium';
+    
+    if (normalizedType === 'firefox') {
+      // Launch Firefox on-demand if not already running
+      if (!this.firefoxBrowser) {
+        logger.info('Launching Firefox browser on-demand...');
+        this.firefoxBrowser = await firefox.launch({
+          headless: true
+        });
+        logger.info('Firefox browser launched successfully');
+      }
+      return this.firefoxBrowser;
+    } else {
+      // Use Chromium (should already be launched)
+      if (!this.chromiumBrowser) {
+        logger.info('Launching Chromium browser on-demand...');
+        this.chromiumBrowser = await chromium.launch({
+          headless: true,
+          args: ['--no-sandbox', '--disable-setuid-sandbox']
+        });
+        logger.info('Chromium browser launched successfully');
+      }
+      return this.chromiumBrowser;
+    }
+  }
+  
   private async handleCommand(command: BrowserCommand & { cookies?: any }) {
     logger.info(`Processing command ${command.id}: ${command.command}`, {
       hasCookies: !!(command.cookies),
@@ -571,11 +592,16 @@ export class BrowserService {
           cookies = sessionData.cookies;
         }
         
+        // Get the appropriate browser for this session
+        const browserType = sessionData?.browser || 'chrome';
+        const browser = await this.getBrowserForSession(browserType);
+        logger.info(`Creating ${browserType} browser context for session ${command.session_id}`);
+        
         // Create HAR file path for this session
         const harPath = path.join(this.screenshotDir, `session-${command.session_id}.har`);
         
         // Create new browser context with HAR recording
-        const context = await this.browser!.newContext({
+        const context = await browser.newContext({
           viewport: sessionData?.viewport as { width: number; height: number } || { width: 1280, height: 720 },
           userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           recordHar: { path: harPath, mode: 'full' }
@@ -1542,9 +1568,12 @@ export class BrowserService {
     }
     this.activeSessions.clear();
     
-    // Close browser
-    if (this.browser) {
-      await this.browser.close();
+    // Close browsers
+    if (this.chromiumBrowser) {
+      await this.chromiumBrowser.close();
+    }
+    if (this.firefoxBrowser) {
+      await this.firefoxBrowser.close();
     }
     
     // Mark machine as inactive
