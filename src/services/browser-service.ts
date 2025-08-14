@@ -19,6 +19,9 @@ interface ActiveSession {
   sessionId: string;
   url: string;
   createdAt: Date;
+  lastUsed: Date;
+  isReserved: boolean;
+  reservationId?: string;
   harPath?: string;
   networkRequests: Array<{
     url: string;
@@ -28,6 +31,15 @@ interface ActiveSession {
     size?: number;
     headers?: Record<string, string>;
     timestamp: string;
+  }>;
+}
+
+interface SessionPool {
+  maxConcurrent: number;
+  activeCount: number;
+  queuedCommands: Array<{
+    command: BrowserCommand;
+    timestamp: Date;
   }>;
 }
 
@@ -43,6 +55,16 @@ export class BrowserService {
   private activeSessions: Map<string, ActiveSession> = new Map();
   private screenshotDir: string;
   private lastCommandId?: string;
+  
+  // Concurrent session management
+  private sessionPool: SessionPool = {
+    maxConcurrent: 4, // Max 4 concurrent browser sessions
+    activeCount: 0,
+    queuedCommands: []
+  };
+  private commandQueue: Map<string, BrowserCommand> = new Map();
+  private processingCommands: Set<string> = new Set();
+  private sessionCleanupInterval?: NodeJS.Timeout;
   
   constructor() {
     // Load or generate machine ID
@@ -77,6 +99,9 @@ export class BrowserService {
       
       // Start heartbeat
       this.startHeartbeat();
+      
+      // Start session cleanup interval
+      this.startSessionCleanup();
       
       // Start polling for commands instead of using Realtime
       logger.info('Starting command polling service...');
@@ -163,8 +188,8 @@ export class BrowserService {
         is_active: true,
         capabilities: {
           browsers: ['chrome'], // TODO: Detect available browsers
-          maxSessions: 5,
-          activeSessions: 0
+          maxSessions: this.sessionPool.maxConcurrent,
+          activeSessions: this.sessionPool.activeCount
         },
         user_id: this.realtimeAuth.getUserId()!
       }, {
@@ -178,6 +203,100 @@ export class BrowserService {
     }
     
     logger.info(`Machine registered: ${data.machine_name}`);
+  }
+  
+  private startSessionCleanup() {
+    // Clean up idle sessions every 30 seconds
+    this.sessionCleanupInterval = setInterval(async () => {
+      const idleTimeout = 5 * 60 * 1000; // 5 minutes
+      const now = Date.now();
+      
+      for (const [sessionId, session] of this.activeSessions) {
+        const idleTime = now - session.lastUsed.getTime();
+        
+        // Close idle non-reserved sessions
+        if (idleTime > idleTimeout && !session.isReserved) {
+          logger.info(`Closing idle session ${sessionId} (idle for ${Math.round(idleTime / 1000)}s)`);
+          await this.closeSession(sessionId, true);
+        }
+      }
+      
+      // Process any queued commands if we have capacity
+      this.processCommandQueue();
+    }, 30000);
+  }
+  
+  private async processCommandQueue() {
+    // Check if we can process more commands
+    const availableSlots = this.sessionPool.maxConcurrent - this.activeSessions.size;
+    
+    if (availableSlots <= 0 || this.commandQueue.size === 0) {
+      return;
+    }
+    
+    // Process commands from queue
+    const commandsToProcess = [];
+    for (const [commandId, command] of this.commandQueue) {
+      if (this.processingCommands.has(commandId)) {
+        continue; // Already processing
+      }
+      
+      // Check if session already exists or we can create a new one
+      const sessionExists = this.activeSessions.has(command.session_id);
+      if (sessionExists || this.activeSessions.size < this.sessionPool.maxConcurrent) {
+        commandsToProcess.push({ commandId, command });
+        if (commandsToProcess.length >= availableSlots) break;
+      }
+    }
+    
+    // Process commands in parallel
+    await Promise.all(
+      commandsToProcess.map(async ({ commandId, command }) => {
+        this.processingCommands.add(commandId);
+        this.commandQueue.delete(commandId);
+        
+        try {
+          await this.handleCommand(command);
+        } finally {
+          this.processingCommands.delete(commandId);
+        }
+      })
+    );
+  }
+  
+  private async reserveSession(sessionId: string, reservationId?: string): Promise<boolean> {
+    // Try to reserve a session slot for exclusive use
+    if (this.activeSessions.size >= this.sessionPool.maxConcurrent) {
+      // Try to free up a non-reserved idle session
+      const idleSession = Array.from(this.activeSessions.entries())
+        .find(([_, session]) => !session.isReserved && 
+          Date.now() - session.lastUsed.getTime() > 60000); // 1 minute idle
+      
+      if (idleSession) {
+        logger.info(`Evicting idle session ${idleSession[0]} to make room`);
+        await this.closeSession(idleSession[0], true);
+      } else {
+        return false; // No capacity
+      }
+    }
+    
+    const session = this.activeSessions.get(sessionId);
+    if (session) {
+      session.isReserved = true;
+      session.reservationId = reservationId;
+      session.lastUsed = new Date();
+    }
+    
+    return true;
+  }
+  
+  private releaseSession(sessionId: string) {
+    const session = this.activeSessions.get(sessionId);
+    if (session) {
+      session.isReserved = false;
+      session.reservationId = undefined;
+      session.lastUsed = new Date();
+    }
   }
   
   private startHeartbeat() {
@@ -209,8 +328,8 @@ export class BrowserService {
           p_machine_id: this.machineId,
           p_capabilities: {
             browsers: ['chrome'],
-            maxSessions: 5,
-            activeSessions: activeSessions || 0
+            maxSessions: this.sessionPool.maxConcurrent,
+            activeSessions: this.activeSessions.size
           }
         });
       } catch (error) {
@@ -355,9 +474,24 @@ export class BrowserService {
       case 'command':
         logger.info('Received command via SSE', { 
           commandId: message.command.id,
-          command: message.command.command 
+          command: message.command.command,
+          sessionId: message.command.session_id,
+          activeSessionCount: this.activeSessions.size,
+          queueSize: this.commandQueue.size,
+          hasCookies: !!(message.command.cookies),
+          cookieCount: Array.isArray(message.command.cookies) ? message.command.cookies.length : 0,
+          cookieNames: Array.isArray(message.command.cookies) ? message.command.cookies.map((c: any) => c.name) : []
         });
-        await this.handleCommand(message.command);
+        
+        // Check if we're already processing this command
+        if (this.processingCommands.has(message.command.id)) {
+          logger.warn(`Command ${message.command.id} is already being processed`);
+          break;
+        }
+        
+        // Add to queue and process
+        this.commandQueue.set(message.command.id, message.command);
+        this.processCommandQueue();
         this.lastCommandId = message.command.id;
         break;
         
@@ -375,8 +509,11 @@ export class BrowserService {
     }
   }
   
-  private async handleCommand(command: BrowserCommand) {
-    logger.info(`Processing command ${command.id}: ${command.command}`);
+  private async handleCommand(command: BrowserCommand & { cookies?: any }) {
+    logger.info(`Processing command ${command.id}: ${command.command}`, {
+      hasCookies: !!(command.cookies),
+      cookieCount: Array.isArray(command.cookies) ? command.cookies.length : 0
+    });
     
     const startTime = Date.now();
     let success = false;
@@ -392,28 +529,37 @@ export class BrowserService {
       session = this.activeSessions.get(command.session_id);
       
       if (!session) {
-        // Need to create session first - use Edge Function with API key auth
-        const config = this.realtimeAuth.getConfig();
-        const supabaseUrl = 'https://zqlfxakbkwssxfynrmnk.supabase.co';
+        // First check if cookies were passed directly with the command (from SSE)
+        let cookies = command.cookies;
+        let sessionData: BrowserSession | null = null;
         
-        const response = await fetch(`${supabaseUrl}/functions/v1/get-browser-session`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Supastate-Auth': config.supastate?.apiKey || ''
-          },
-          body: JSON.stringify({ sessionId: command.session_id })
-        });
-        
-        if (!response.ok) {
-          throw new Error('Session not found');
-        }
-        
-        const result = await response.json() as { session: BrowserSession };
-        const sessionData = result.session;
-        
-        if (!sessionData) {
-          throw new Error('Session not found');
+        // If no cookies in command, fetch session data from edge function
+        if (!cookies) {
+          const config = this.realtimeAuth.getConfig();
+          const supabaseUrl = 'https://zqlfxakbkwssxfynrmnk.supabase.co';
+          
+          const response = await fetch(`${supabaseUrl}/functions/v1/get-browser-session`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Supastate-Auth': config.supastate?.apiKey || ''
+            },
+            body: JSON.stringify({ sessionId: command.session_id })
+          });
+          
+          if (!response.ok) {
+            throw new Error('Session not found');
+          }
+          
+          const result = await response.json() as { session: BrowserSession };
+          sessionData = result.session;
+          
+          if (!sessionData) {
+            throw new Error('Session not found');
+          }
+          
+          // Use cookies from session data if available
+          cookies = sessionData.cookies;
         }
         
         // Create HAR file path for this session
@@ -421,10 +567,238 @@ export class BrowserService {
         
         // Create new browser context with HAR recording
         const context = await this.browser!.newContext({
-          viewport: sessionData.viewport as { width: number; height: number } || { width: 1280, height: 720 },
+          viewport: sessionData?.viewport as { width: number; height: number } || { width: 1280, height: 720 },
           userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
           recordHar: { path: harPath, mode: 'full' }
         });
+        
+        // Set cookies if provided (either from command or session data)
+        if (cookies && Array.isArray(cookies)) {
+          logger.info('Setting cookies for browser session', {
+            sessionId: command.session_id,
+            cookieCount: cookies.length,
+            source: command.cookies ? 'SSE command' : 'edge function',
+            rawCookieSample: cookies[0] ? {
+              name: cookies[0].name,
+              valueLength: cookies[0].value ? cookies[0].value.length : 0,
+              valueStart: cookies[0].value ? cookies[0].value.substring(0, 50) : null,
+              hasValue: !!cookies[0].value,
+              domain: cookies[0].domain,
+              path: cookies[0].path
+            } : null
+          });
+          
+          try {
+            // Special handling for Supabase split cookies - REMOVED
+            // We don't need to reconstruct them, just pass them through
+            // The browser will handle the split cookies automatically
+            let processedCookies = [...cookies];
+            
+            // Playwright expects cookies in a specific format
+            // Cookies are base64 encoded to protect them through various layers
+            // We need to decode from base64, then URL decode for Playwright
+            const playwrightCookies = processedCookies.map((cookie: any) => {
+              let cookieValue = cookie.value;
+              
+              // Step 1: Decode from base64 if needed
+              if (cookieValue && typeof cookieValue === 'string') {
+                // Check if it looks like base64 (not starting with % which indicates URL encoding)
+                if (!cookieValue.startsWith('%') && cookieValue.match(/^[A-Za-z0-9+/]+=*$/)) {
+                  try {
+                    // Decode from base64 to get the original URL-encoded value
+                    const decoded = Buffer.from(cookieValue, 'base64').toString('utf-8');
+                    cookieValue = decoded;
+                    logger.info('Decoded cookie from base64', {
+                      name: cookie.name,
+                      originalLength: cookie.value.length,
+                      decodedLength: decoded.length,
+                      decodedStartsWith: decoded.substring(0, 20)
+                    });
+                  } catch (e) {
+                    logger.warn('Failed to decode cookie from base64, using as-is', {
+                      name: cookie.name,
+                      error: e instanceof Error ? e.message : String(e)
+                    });
+                  }
+                }
+                
+                // Step 2: URL decode the cookies
+                // IMPORTANT: Playwright's addCookies() expects the actual cookie values,
+                // not URL-encoded. The browser will URL-encode them when sending in headers.
+                if (cookieValue.includes('%')) {
+                  try {
+                    const urlDecoded = decodeURIComponent(cookieValue);
+                    cookieValue = urlDecoded;
+                    logger.info('URL decoded cookie for Playwright', {
+                      name: cookie.name,
+                      originalLength: cookieValue.length,
+                      decodedLength: urlDecoded.length,
+                      isJSON: urlDecoded.startsWith('{') || urlDecoded.startsWith('t":"')
+                    });
+                  } catch (e) {
+                    logger.warn('Failed to URL decode cookie, using as-is', {
+                      name: cookie.name,
+                      error: e instanceof Error ? e.message : String(e)
+                    });
+                  }
+                }
+              }
+              
+              // Log what we're setting
+              logger.debug('Setting cookie in Playwright', {
+                name: cookie.name,
+                valueLength: cookieValue ? cookieValue.length : 0,
+                isJSON: cookieValue && (cookieValue.startsWith('{') || cookieValue.startsWith('t":"')),
+                firstChars: cookieValue ? cookieValue.substring(0, 30) : null
+              });
+              
+              // Normalize sameSite value to match Playwright's expectations
+              // Try removing sameSite entirely for localhost testing
+              let sameSite: 'Strict' | 'Lax' | 'None' | undefined = undefined;
+              if (cookie.sameSite) {
+                const sameSiteValue = String(cookie.sameSite).toLowerCase();
+                if (sameSiteValue === 'strict') sameSite = 'Strict';
+                else if (sameSiteValue === 'lax') sameSite = 'Lax';
+                else if (sameSiteValue === 'none') sameSite = 'None';
+              }
+              
+              const playwrightCookie: any = {
+                name: cookie.name,
+                value: cookieValue,  // Decoded value for Playwright
+                domain: cookie.domain || undefined,
+                path: cookie.path || '/',
+                httpOnly: cookie.httpOnly !== false, // Default to true
+                secure: cookie.secure || false,
+              };
+              
+              // Only add sameSite if it's defined
+              if (sameSite) {
+                playwrightCookie.sameSite = sameSite;
+              }
+              
+              // Add expires if provided
+              // Playwright expects expires as seconds since Unix epoch
+              if (cookie.expires) {
+                // If expires is a number, use it directly (assumes Unix timestamp in seconds)
+                if (typeof cookie.expires === 'number') {
+                  playwrightCookie.expires = cookie.expires;
+                } else if (typeof cookie.expires === 'string') {
+                  // Try to parse as date string
+                  const expiresDate = new Date(cookie.expires);
+                  if (!isNaN(expiresDate.getTime())) {
+                    playwrightCookie.expires = Math.floor(expiresDate.getTime() / 1000);
+                  }
+                }
+              }
+              
+              return playwrightCookie;
+            });
+            
+            await context.addCookies(playwrightCookies);
+            
+            // Log exact cookie values for comparison with browser headers
+            logger.info('EXACT COOKIE VALUES SET IN PLAYWRIGHT:', {
+              sessionId: command.session_id,
+              cookieCount: playwrightCookies.length
+            });
+            
+            // Log each cookie value exactly as set
+            playwrightCookies.forEach((cookie, index) => {
+              logger.info(`Cookie ${index}: ${cookie.name}`, {
+                exactValue: cookie.value.substring(0, 100) + (cookie.value.length > 100 ? '...' : ''),
+                domain: cookie.domain,
+                path: cookie.path,
+                httpOnly: cookie.httpOnly,
+                secure: cookie.secure,
+                sameSite: cookie.sameSite
+              });
+            });
+            
+            // Verify cookies were actually set in the browser context
+            const verifiedCookies = await context.cookies();
+            logger.info('VERIFIED COOKIES IN BROWSER CONTEXT:', {
+              sessionId: command.session_id,
+              totalCookies: verifiedCookies.length,
+              cookieNames: verifiedCookies.map(c => c.name),
+              sbAuthCookies: verifiedCookies.filter(c => c.name.startsWith('sb-')).map(c => ({
+                name: c.name,
+                domain: c.domain,
+                path: c.path,
+                valueLength: c.value.length,
+                firstChars: c.value.substring(0, 50)
+              }))
+            });
+            
+            // TEST: Try to reconstruct and validate the JWT from the split cookies
+            const cookie0 = verifiedCookies.find(c => c.name === 'sb-service-auth-token.0');
+            const cookie1 = verifiedCookies.find(c => c.name === 'sb-service-auth-token.1');
+            
+            if (cookie0 && cookie1) {
+              try {
+                // The cookies should combine to form a complete JSON auth object
+                const fullAuthJson = cookie0.value + cookie1.value;
+                logger.info('JWT VALIDATION TEST: Attempting to parse combined cookies', {
+                  cookie0Length: cookie0.value.length,
+                  cookie1Length: cookie1.value.length,
+                  combinedLength: fullAuthJson.length,
+                  startsWithBrace: fullAuthJson.startsWith('{'),
+                  endsWithBrace: fullAuthJson.endsWith('}')
+                });
+                
+                // Try to parse as JSON
+                const authData = JSON.parse(fullAuthJson);
+                logger.info('JWT VALIDATION TEST: Successfully parsed auth JSON!', {
+                  hasAccessToken: !!authData.access_token,
+                  hasUser: !!authData.user,
+                  userId: authData.user?.id,
+                  email: authData.user?.email,
+                  expiresAt: authData.expires_at
+                });
+                
+                // Extract and validate the JWT token itself
+                if (authData.access_token) {
+                  // Basic JWT structure check (header.payload.signature)
+                  const jwtParts = authData.access_token.split('.');
+                  if (jwtParts.length === 3) {
+                    // Decode the payload (base64)
+                    const payload = JSON.parse(Buffer.from(jwtParts[1], 'base64').toString());
+                    logger.info('JWT VALIDATION TEST: JWT payload decoded', {
+                      sub: payload.sub,
+                      email: payload.email,
+                      exp: payload.exp,
+                      iat: payload.iat,
+                      expiresAt: new Date(payload.exp * 1000).toISOString(),
+                      isExpired: Date.now() > payload.exp * 1000
+                    });
+                  } else {
+                    logger.warn('JWT VALIDATION TEST: Invalid JWT structure', {
+                      parts: jwtParts.length
+                    });
+                  }
+                }
+              } catch (error) {
+                logger.error('JWT VALIDATION TEST: Failed to parse/validate cookies as JWT', {
+                  error: error instanceof Error ? error.message : String(error),
+                  cookie0FirstChars: cookie0.value.substring(0, 100),
+                  cookie1FirstChars: cookie1.value.substring(0, 100)
+                });
+              }
+            }
+          } catch (error) {
+            logger.error('Failed to set cookies', {
+              sessionId: command.session_id,
+              error: error instanceof Error ? error.message : String(error),
+              errorStack: error instanceof Error ? error.stack : undefined,
+              cookiesSample: cookies.slice(0, 2).map((c: any) => ({
+                name: c.name,
+                valueLength: c.value ? c.value.length : 0,
+                domain: c.domain,
+                path: c.path
+              }))
+            });
+            // Continue anyway - cookies are not critical for all tests
+          }
+        }
         
         const page = await context.newPage();
         
@@ -469,13 +843,18 @@ export class BrowserService {
           context,
           page,
           sessionId: command.session_id,
-          url: sessionData.url,
+          url: sessionData?.url || '',
           createdAt: new Date(),
+          lastUsed: new Date(),
+          isReserved: false,
           harPath,
           networkRequests
         };
         
         this.activeSessions.set(command.session_id, session);
+      } else {
+        // Update last used time for existing session
+        session.lastUsed = new Date();
       }
       
       // Process the command
@@ -1127,6 +1506,10 @@ export class BrowserService {
     
     if (this.heartbeatInterval) {
       clearInterval(this.heartbeatInterval);
+    }
+    
+    if (this.sessionCleanupInterval) {
+      clearInterval(this.sessionCleanupInterval);
     }
     
     if (this.pollingInterval) {

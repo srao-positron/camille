@@ -59,6 +59,7 @@ export interface Database {
           status: string
           url: string
           viewport: Json
+          cookies: Json | null
           created_at: string
           closed_at: string | null
           user_id: string
