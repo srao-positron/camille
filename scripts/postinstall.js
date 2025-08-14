@@ -29,14 +29,26 @@ if (!fs.existsSync(promptsDir)) {
 // Install Playwright browsers for browser automation
 console.log('\n🌐 Installing browser automation support...');
 try {
+  // Install both Chromium and Firefox for multi-browser support
+  console.log('   Installing Chromium...');
   execSync('npx playwright install chromium', { 
     stdio: 'inherit',
     cwd: process.cwd()
   });
-  console.log('✅ Browser automation ready');
+  console.log('   ✓ Chromium installed');
+  
+  console.log('   Installing Firefox...');
+  execSync('npx playwright install firefox', { 
+    stdio: 'inherit',
+    cwd: process.cwd()
+  });
+  console.log('   ✓ Firefox installed');
+  
+  console.log('✅ Browser automation ready (Chromium & Firefox)');
 } catch (error) {
   console.warn('⚠️  Failed to install browser automation support');
-  console.warn('   To enable browser automation later, run: npx playwright install chromium');
+  console.warn('   To enable browser automation later, run:');
+  console.warn('   npx playwright install chromium firefox');
 }
 
 // Instructions for setup

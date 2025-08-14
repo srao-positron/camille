@@ -3,7 +3,7 @@ import { logger } from '../logger.js';
 import { createHash } from 'crypto';
 import * as os from 'os';
 import { SupabaseClient } from '@supabase/supabase-js';
-import { chromium, Browser, BrowserContext, Page } from 'playwright';
+import { chromium, firefox, Browser, BrowserContext, Page } from 'playwright';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import type { Database } from '../types/supabase.js';
@@ -52,6 +52,7 @@ export class BrowserService {
   private pollingInterval?: NodeJS.Timeout;
   private isShuttingDown = false;
   private browser?: Browser;
+  private browserType: 'chromium' | 'firefox';
   private activeSessions: Map<string, ActiveSession> = new Map();
   private screenshotDir: string;
   private lastCommandId?: string;
@@ -66,11 +67,12 @@ export class BrowserService {
   private processingCommands: Set<string> = new Set();
   private sessionCleanupInterval?: NodeJS.Timeout;
   
-  constructor() {
+  constructor(browserType: 'chromium' | 'firefox' = 'chromium') {
     // Load or generate machine ID
     this.machineId = this.loadOrGenerateMachineId();
     this.machineName = os.hostname() || `camille-${this.machineId.slice(0, 8)}`;
     this.realtimeAuth = new BrowserRealtimeAuth(this.machineId);
+    this.browserType = browserType;
     
     // Create screenshots directory
     this.screenshotDir = path.join(os.tmpdir(), 'camille-screenshots');
@@ -87,12 +89,19 @@ export class BrowserService {
       // Ensure screenshots directory exists
       await fs.mkdir(this.screenshotDir, { recursive: true });
       
-      // Launch browser
-      this.browser = await chromium.launch({
-        headless: true,
-        args: ['--no-sandbox', '--disable-setuid-sandbox']
-      });
-      logger.info('Browser launched successfully');
+      // Launch browser based on type
+      logger.info(`Launching ${this.browserType} browser...`);
+      if (this.browserType === 'firefox') {
+        this.browser = await firefox.launch({
+          headless: true
+        });
+      } else {
+        this.browser = await chromium.launch({
+          headless: true,
+          args: ['--no-sandbox', '--disable-setuid-sandbox']
+        });
+      }
+      logger.info(`${this.browserType} browser launched successfully`);
       
       // Register this machine
       await this.registerMachine();
@@ -187,7 +196,7 @@ export class BrowserService {
         last_heartbeat: new Date().toISOString(),
         is_active: true,
         capabilities: {
-          browsers: ['chrome'], // TODO: Detect available browsers
+          browsers: [this.browserType === 'firefox' ? 'firefox' : 'chrome'],
           maxSessions: this.sessionPool.maxConcurrent,
           activeSessions: this.sessionPool.activeCount
         },
@@ -327,7 +336,7 @@ export class BrowserService {
         await this.supabase!.rpc('update_browser_machine_heartbeat', {
           p_machine_id: this.machineId,
           p_capabilities: {
-            browsers: ['chrome'],
+            browsers: [this.browserType === 'firefox' ? 'firefox' : 'chrome'],
             maxSessions: this.sessionPool.maxConcurrent,
             activeSessions: this.activeSessions.size
           }
