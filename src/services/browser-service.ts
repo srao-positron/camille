@@ -3,7 +3,7 @@ import { logger } from '../logger.js';
 import { createHash } from 'crypto';
 import * as os from 'os';
 import { SupabaseClient } from '@supabase/supabase-js';
-import { chromium, firefox, Browser, BrowserContext, Page } from 'playwright';
+import { chromium, firefox, devices, Browser, BrowserContext, Page } from 'playwright';
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import type { Database } from '../types/supabase.js';
@@ -600,12 +600,40 @@ export class BrowserService {
         // Create HAR file path for this session
         const harPath = path.join(this.screenshotDir, `session-${command.session_id}.har`);
         
-        // Create new browser context with HAR recording
-        const context = await browser.newContext({
-          viewport: sessionData?.viewport as { width: number; height: number } || { width: 1280, height: 720 },
-          userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        // Check if device emulation is requested
+        const deviceName = (sessionData as any)?.device;
+        let contextOptions: any = {
           recordHar: { path: harPath, mode: 'full' }
-        });
+        };
+        
+        if (deviceName && devices[deviceName]) {
+          // Use device emulation
+          const device = devices[deviceName];
+          logger.info(`Using device emulation: ${deviceName}`, {
+            viewport: device.viewport,
+            userAgent: device.userAgent?.substring(0, 100),
+            isMobile: device.isMobile,
+            hasTouch: device.hasTouch
+          });
+          contextOptions = {
+            ...contextOptions,
+            ...device  // This includes viewport, userAgent, isMobile, hasTouch, etc.
+          };
+        } else {
+          // Use custom viewport or defaults
+          contextOptions = {
+            ...contextOptions,
+            viewport: sessionData?.viewport as { width: number; height: number } || { width: 1280, height: 720 },
+            userAgent: (sessionData as any)?.userAgent || 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+          };
+          
+          if (deviceName && !devices[deviceName]) {
+            logger.warn(`Unknown device name: ${deviceName}. Using default viewport.`);
+          }
+        }
+        
+        // Create new browser context with device emulation or custom settings
+        const context = await browser.newContext(contextOptions);
         
         // Set cookies if provided (either from command or session data)
         if (cookies && Array.isArray(cookies)) {
