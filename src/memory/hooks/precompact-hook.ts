@@ -99,10 +99,13 @@ export class PreCompactHook {
       await this.loadCheckpoints();
 
       // Process the transcript
-      const stats = await this.processTranscript(input);
+      const { stats, messages } = await this.processTranscript(input);
 
       // Save checkpoints
       await this.saveCheckpoints();
+      
+      // Generate Living Design Document if Supastate is configured
+      await this.generateDesignDocument(input, messages);
 
       // Log success
       logger.info('Transcript processed successfully', stats);
@@ -133,16 +136,19 @@ export class PreCompactHook {
   /**
    * Process the transcript file
    */
-  private async processTranscript(input: PreCompactInput): Promise<any> {
+  private async processTranscript(input: PreCompactInput): Promise<{ stats: any, messages: RawTranscriptEntry[] }> {
     // Read the transcript
     const messages = await this.readTranscript(input.transcript_path);
     
     if (messages.length === 0) {
       return {
-        messages_processed: 0,
-        chunks_created: 0,
-        embeddings_generated: 0,
-        processing_time_ms: 0
+        stats: {
+          messages_processed: 0,
+          chunks_created: 0,
+          embeddings_generated: 0,
+          processing_time_ms: 0
+        },
+        messages
       };
     }
 
@@ -152,10 +158,13 @@ export class PreCompactHook {
     if (newMessages.length === 0) {
       logger.info('No new messages to process');
       return {
-        messages_processed: 0,
-        chunks_created: 0,
-        embeddings_generated: 0,
-        processing_time_ms: 0
+        stats: {
+          messages_processed: 0,
+          chunks_created: 0,
+          embeddings_generated: 0,
+          processing_time_ms: 0
+        },
+        messages
       };
     }
 
@@ -210,11 +219,14 @@ export class PreCompactHook {
         logger.warn('No project path found in hook input or transcript messages');
         // We'll skip processing if we can't determine the project
         return {
-          messages_processed: 0,
-          chunks_created: 0,
-          embeddings_generated: 0,
-          processing_time_ms: 0,
-          error: 'No project path could be determined'
+          stats: {
+            messages_processed: 0,
+            chunks_created: 0,
+            embeddings_generated: 0,
+            processing_time_ms: 0,
+            error: 'No project path could be determined'
+          },
+          messages
         };
       }
     }
@@ -225,7 +237,8 @@ export class PreCompactHook {
     
     if (useSupastateDirect) {
       // Direct ingestion to Supastate
-      return await this.ingestToSupastateDirect(processorMessages, input.session_id, projectPath);
+      const stats = await this.ingestToSupastateDirect(processorMessages, input.session_id, projectPath);
+      return { stats, messages };
     }
     
     // Use TranscriptProcessor for chunking, embedding, and storage
@@ -245,10 +258,13 @@ export class PreCompactHook {
     await this.updateCheckpoint(input.session_id, lastMessage, messages.length - 1);
 
     return {
-      messages_processed: newMessages.length,
-      chunks_created: result.chunks,
-      embeddings_generated: result.embeddings,
-      processing_time_ms: Date.now() - startTime
+      stats: {
+        messages_processed: newMessages.length,
+        chunks_created: result.chunks,
+        embeddings_generated: result.embeddings,
+        processing_time_ms: Date.now() - startTime
+      },
+      messages
     };
   }
 
@@ -530,5 +546,144 @@ export class PreCompactHook {
         projectPath,
       }
     };
+  }
+
+  /**
+   * Generate a Living Design Document for this compaction
+   */
+  private async generateDesignDocument(input: PreCompactInput, messages: RawTranscriptEntry[]): Promise<void> {
+    try {
+      logger.debug('generateDesignDocument called', { 
+        inputKeys: Object.keys(input),
+        hasMessages: !!messages,
+        messagesLength: messages?.length 
+      });
+      
+      const config = this.configManager.getConfig();
+      
+      // Only generate if Supastate is configured
+      if (!config.supastate?.enabled || !config.supastate?.url) {
+        logger.debug('Supastate not configured, skipping design document generation');
+        return;
+      }
+
+      logger.debug('Generating design document', { 
+        messageCount: messages?.length,
+        firstMessage: messages?.[0] 
+      });
+
+      // Prepare the compaction payload
+      const processedMessages = [];
+      for (const msg of messages) {
+        try {
+          // Handle different message formats
+          let content = '';
+          if (typeof msg.content === 'string') {
+            content = msg.content;
+          } else if (msg.message) {
+            if (typeof msg.message === 'string') {
+              content = msg.message;
+            } else if (msg.message.content) {
+              if (Array.isArray(msg.message.content)) {
+                content = msg.message.content
+                  .filter((c: any) => c && (c.text || c.content))
+                  .map((c: any) => c.text || c.content || '')
+                  .join('\n');
+              } else if (typeof msg.message.content === 'string') {
+                content = msg.message.content;
+              }
+            }
+          }
+          
+          if (content) {
+            processedMessages.push({
+              role: msg.type || msg.role || 'user',
+              content: content,
+              timestamp: msg.timestamp || new Date().toISOString()
+            });
+          }
+        } catch (err) {
+          logger.warn('Failed to process message for design document', { msg, error: err });
+        }
+      }
+
+      const compactionPayload = {
+        sessionId: input.session_id,
+        messages: processedMessages,
+        timestamp: new Date().toISOString(),
+        compactionFileId: input.transcript_path,
+        trigger: input.trigger,
+        reason: input.compaction_reason,
+        projectPath: input.project_path
+      };
+
+      // Call Supastate design document API
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        'X-Document-Type': 'compaction'
+      };
+
+      // Add authentication
+      if (config.supastate.apiKey) {
+        const userId = config.supastate.userId || 'anonymous';
+        const workspaceId = config.supastate.teamId ? `team:${config.supastate.teamId}` : `user:${userId}`;
+        headers['X-Supastate-Auth'] = JSON.stringify({
+          userId: userId,
+          workspaceId: workspaceId
+        });
+        headers['X-API-Key'] = config.supastate.apiKey;
+      } else if (config.supastate.accessToken) {
+        headers['Authorization'] = `Bearer ${config.supastate.accessToken}`;
+      }
+
+      // Use local development URL for now until the API is deployed
+      const portalUrl = 'http://localhost:3000';
+      const url = `${portalUrl}/api/generate-design-document`;
+      logger.info('Generating design document via Supastate', { 
+        url, 
+        sessionId: input.session_id,
+        messageCount: processedMessages.length,
+        payloadSize: JSON.stringify(compactionPayload).length
+      });
+
+      const response = await fetch(url, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(compactionPayload)
+      });
+
+      const responseText = await response.text();
+      
+      if (!response.ok) {
+        logger.error('Failed to generate design document', { 
+          status: response.status, 
+          error: responseText 
+        });
+        // Don't throw - we don't want to block the compaction
+        return;
+      }
+
+      let result;
+      try {
+        result = JSON.parse(responseText);
+      } catch (e) {
+        logger.error('Failed to parse design document response', { 
+          responseText,
+          error: e 
+        });
+        return;
+      }
+      
+      logger.info('Design document generation started', { 
+        documentId: result.documentId,
+        status: result.status 
+      });
+
+    } catch (error) {
+      // Log but don't throw - design document generation should not block compaction
+      logger.error('Design document generation failed', { 
+        error: error instanceof Error ? error.message : error 
+      });
+    }
   }
 }

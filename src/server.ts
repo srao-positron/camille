@@ -32,6 +32,7 @@ import { PipelineManager } from './memory/pipeline-manager.js';
 import { SupastateSyncService } from './services/supastate-sync.js';
 import { SupastateStorageProvider } from './storage/supastate-provider.js';
 import { BrowserService } from './services/browser-service.js';
+import { GitCommitWatcher } from './git/commit-watcher.js';
 
 /**
  * Server status
@@ -75,6 +76,7 @@ export class CamilleServer {
   private apiServer?: CamilleAPIServer;
   private unifiedSearch?: CodeUnifiedSearch;
   private edgeResolver?: EdgeResolver;
+  private gitWatcher?: GitCommitWatcher;
   private embeddingManager?: EmbeddingManager;
   private pipelineManager?: PipelineManager;
   private parsedFiles: any[] = [];
@@ -115,6 +117,9 @@ export class CamilleServer {
     // Initialize collections
     this.watchers = new Map();
     this.watchedDirectories = new Set();
+    
+    // Initialize git watcher
+    this.gitWatcher = new GitCommitWatcher();
     
     // Queue for processing files with optimal concurrency
     // Use CPU count minus 2 for file parsing (CPU-bound)
@@ -286,6 +291,18 @@ export class CamilleServer {
       consoleOutput.warning(chalk.yellow('⚠️  REST API server unavailable'));
     }
     
+    // Initialize and start git watcher
+    if (this.gitWatcher && config.supastate?.enabled) {
+      try {
+        await this.gitWatcher.initialize();
+        await this.gitWatcher.start();
+        consoleOutput.info(chalk.green('✅ Git commit watcher started'));
+      } catch (error) {
+        logger.error('Failed to start git watcher', { error });
+        consoleOutput.warning(chalk.yellow('⚠️  Git commit watcher unavailable'));
+      }
+    }
+    
     // Normalize to array
     const dirsToWatch = Array.isArray(directories) ? directories : [directories];
     
@@ -423,6 +440,11 @@ export class CamilleServer {
     // Set up file watcher
     this.setupFileWatcher(absPath);
     
+    // Add to git watcher if it's a git repository
+    if (this.gitWatcher) {
+      await this.gitWatcher.addRepository(absPath);
+    }
+    
     consoleOutput.success(`✅ Now watching: ${absPath}`);
     logger.logServerEvent('directory_added', { directory: absPath });
   }
@@ -450,6 +472,11 @@ export class CamilleServer {
     // Remove from watched set
     this.watchedDirectories.delete(absPath);
     this.status.watchedDirectories = Array.from(this.watchedDirectories);
+    
+    // Remove from git watcher
+    if (this.gitWatcher) {
+      await this.gitWatcher.removeRepository(absPath);
+    }
     
     // Remove files from index
     const indexedFiles = this.embeddingsIndex.getIndexedFiles();
@@ -516,6 +543,16 @@ export class CamilleServer {
         consoleOutput.info(chalk.gray('Supastate provider closed'));
       } catch (error) {
         logger.error('Failed to close Supastate provider', { error });
+      }
+    }
+    
+    // Stop git watcher
+    if (this.gitWatcher) {
+      try {
+        await this.gitWatcher.stop();
+        consoleOutput.info(chalk.gray('Git watcher stopped'));
+      } catch (error) {
+        logger.error('Failed to stop git watcher', { error });
       }
     }
     
@@ -2107,7 +2144,7 @@ export class CamilleServer {
             };
             
             // Process using the hook's method
-            const stats = await hook['processTranscript'](mockInput);
+            const { stats } = await hook['processTranscript'](mockInput);
             result = {
               chunks: stats.chunks_created || 0,
               embeddings: stats.embeddings_generated || 0
