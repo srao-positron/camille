@@ -274,7 +274,7 @@ export class GitCommitWatcher {
       }
 
       // Use local development URL for now
-      const portalUrl = 'http://localhost:3000';
+      const portalUrl = 'https://www.supastate.ai';
       const url = `${portalUrl}/api/generate-design-document`;
 
       // Prepare headers
